@@ -1,0 +1,35 @@
+# upstream-streaming-server — local development compose file.
+#
+# Brings up a single MediaMTX container that listens for SRT publishes,
+# republishes over RTSP/WebRTC, and exposes a local HTTP API for inspection.
+#
+# Milestone 1: local smoke testing only. No auth, no media validation, no
+# webhooks back to upstream-api-server. See docs/local-dev.md for usage and
+# docs/stream-auth.md / docs/stream-validation.md for what is intentionally
+# deferred.
+
+services:
+  mediamtx:
+    # TODO: review this pin before production. Bumping MediaMTX can change
+    # config-key names and protocol behavior — re-test smoke scripts after any
+    # version bump.
+    image: bluenviron/mediamtx:1.9.3
+    container_name: upstream-mediamtx
+    restart: unless-stopped
+    # Run as root inside the container; MediaMTX does not need extra caps for
+    # the protocols enabled here.
+    ports:
+      # SRT ingest (UDP). Agents publish to this port.
+      - "8890:8890/udp"
+      # RTSP read endpoint (TCP). Used by ffplay/ffprobe in the smoke scripts.
+      - "8554:8554/tcp"
+      # WebRTC signaling/WHEP (HTTP). Browser-friendly read path.
+      - "8889:8889/tcp"
+      # WebRTC ICE/media (UDP). MediaMTX advertises this for peer media.
+      - "8189:8189/udp"
+      # MediaMTX HTTP API. Used locally for `curl localhost:9997/v3/paths/list`.
+      # TODO (production): do NOT expose 9997 publicly. Bind to 127.0.0.1 or
+      # disable in mediamtx.yml.
+      - "9997:9997/tcp"
+    volumes:
+      - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro

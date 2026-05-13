@@ -1,0 +1,98 @@
+# MediaMTX configuration — Milestone 1 (local dev).
+#
+# Scope: accept SRT publishes locally, expose RTSP + WebRTC reads, and surface
+# a local HTTP API for inspection. No auth, no media validation, no API
+# integration. Future milestones will wire runOnReady / runOnDemand / webhook
+# hooks here — search for `TODO (M4)` for the exact insertion points.
+
+###############################################################################
+# Logging
+###############################################################################
+
+logLevel: info
+logDestinations: [stdout]
+
+###############################################################################
+# HTTP API (local debug only)
+###############################################################################
+
+# Enables GET /v3/paths/list and friends. Used by humans during local
+# debugging (e.g. `curl localhost:9997/v3/paths/list`).
+#
+# TODO (production): leave `api: yes` but bind `apiAddress` to 127.0.0.1 so
+# it is not reachable off-box. In M1 we expose 9997 in docker-compose.yml
+# for convenience; do not do that in prod.
+api: yes
+apiAddress: :9997
+
+###############################################################################
+# Auth (M1: disabled — local dev only)
+###############################################################################
+
+# MediaMTX 1.9's default `authInternalUsers` restricts API/metrics/pprof to
+# the in-container loopback. Host-side requests come from the Docker bridge
+# and would be rejected with 401. For local dev we override with a fully
+# permissive set: any publisher/reader/API caller is allowed.
+#
+# TODO (M4): replace with real auth — either MediaMTX's `authHTTP` pointing
+# at `upstream-api-server`, or `authInternalUsers` entries that require an
+# admin password for the API and gate publish on a runOnConnect hook.
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+      - action: metrics
+      - action: pprof
+
+###############################################################################
+# Protocols
+###############################################################################
+
+# RTSP read endpoint. ffplay and ffprobe in the smoke scripts pull from here.
+rtsp: yes
+rtspAddress: :8554
+
+# WebRTC read endpoint. Browser-friendly low-latency playback.
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+
+# HLS intentionally disabled in M1 to keep the surface small. Flip to `yes`
+# and expose port 8888 in docker-compose.yml if you want browser playback
+# without WebRTC. Future milestones may turn this on for the dashboard.
+hls: no
+
+# RTMP not needed — the agent publishes SRT.
+rtmp: no
+
+# SRT ingest. This is the primary listener for upstream-agent.
+srt: yes
+srtAddress: :8890
+
+###############################################################################
+# Paths
+###############################################################################
+
+# Catch-all path: any publisher with streamid `publish:<name>` creates a
+# matching path on the fly. For M1 we accept any name so the local smoke
+# scripts can publish to `publish:test` without per-path config.
+#
+# TODO (M4): replace this catch-all with auth-gated path config. Options:
+#   1. runOnConnect / runOnReady to call upstream-api-server
+#      `POST /v1/ingest/validate-stream` with the session JWT extracted
+#      from streamid, then accept/reject. See docs/stream-auth.md.
+#   2. Explicit per-session path entries created via the HTTP API after a
+#      successful validate call.
+#
+# Until then, this is intentionally permissive — local only.
+paths:
+  all_others:
+    source: publisher
+    # TODO (M4): add `runOnReady:` shell hook to POST stream-started to the
+    # API and `runOnNotReady:` to POST stream-ended. See docs/routing.md.
+    # TODO (M5): add `runOnReady:` snapshotter for latest-frame JPEG.
