@@ -57,7 +57,7 @@ upstream-agent
                                              POST /v1/ingest/stream-ended
 ```
 
-## Milestone 1 flow (what is actually implemented today)
+## Milestone 1 flow (complete)
 
 ```
 developer laptop                       upstream-streaming-server (this repo)
@@ -70,19 +70,55 @@ scripts/inspect_stream.sh    ◀── ffprobe ─┘
 ```
 
 No API server is involved. No JWT is validated. No media checks happen.
-The streaming server is just MediaMTX with a permissive config.
+
+## Milestone 2 flow (complete on the streaming-server side; gated on API env override)
+
+```
+developer laptop                          upstream-api-server               upstream-streaming-server
+─────────────────                         ─────────────────────             ───────────────────────────
+agent / API client
+  POST /v1/stream-sessions/start ─────▶   mints session JWT
+                                          builds srt_url ──┐
+                                                            │
+                       returns srt_url (full string) ◀──────┘
+  export API_SRT_URL='srt://...'
+  scripts/publish_api_srt_url.sh
+    └── ffmpeg → MPEG-TS/H264, unchanged URL ─────────────────────────▶ MediaMTX (8890/udp)
+                                                                          │
+       inspect_stream.sh (path = JWT)  ◀──── RTSP ───────────────────────┤
+                                                                          │
+  POST /v1/stream-sessions/{id}/stop                                      │
+                                                                       (M4: validate-stream + lifecycle webhooks not yet wired)
+```
+
+M2 is **URL compatibility**: the API mints a URL, the streaming server
+accepts it bit-for-bit. There is still no auth check, no media check, and
+no webhook callback on this side — those land in M4. The M2 mediamtx.yml
+remains a permissive catch-all.
+
+## Horizontal scaling note
+
+The streaming server is **horizontally scalable but not unlimited on one
+node.** A single MediaMTX instance can serve many concurrent SRT publishers,
+but eventually one node is not enough — both for raw throughput and for
+fault isolation. The API will eventually be responsible for choosing an
+ingest node and minting the SRT URL for that specific node. That selection
+logic is not present today; the API hardcodes one ingest host. See
+`docs/follow-ups.md` FU-1 for the immediate "make the host configurable"
+step; node selection itself is a later milestone.
 
 ## What changes in each future milestone
 
 | Milestone | What gets added                                              |
 |-----------|--------------------------------------------------------------|
-| **M1** (this) | Local MediaMTX, SRT ingest, RTSP/WebRTC read-back, smoke scripts |
-| M2        | API-issued SRT URL format alignment; e2e against a real api-server |
+| **M1** ✓  | Local MediaMTX, SRT ingest, RTSP/WebRTC read-back, smoke scripts |
+| **M2** ✓  | API SRT URL pass-through script + redaction; M4/M5 contracts documented |
 | M3        | Container-level production hardening (logging, healthchecks) |
-| M4        | Auth: validate-stream webhook, stream-started/ended/failed callbacks, ffprobe validation |
-| M5        | Latest-frame JPEG snapshotter                                |
-| M6        | Processor handoff                                            |
-| M7+       | Recording, HLS, k8s deploy, multi-region                     |
+| M4        | Auth: validate-stream webhook, stream-started/ended/failed callbacks |
+| M5        | ffprobe-based media validation, enforced against `expected` from M4 |
+| M6        | Latest-frame JPEG snapshotter                                |
+| M7        | Processor handoff                                            |
+| M8+       | Recording, HLS production tuning, k8s deploy, multi-region   |
 
 Each item above maps to a `TODO (Mx)` marker in the code or config so the
 boundary stays visible.

@@ -95,4 +95,4 @@ paths:
     source: publisher
     # TODO (M4): add `runOnReady:` shell hook to POST stream-started to the
     # API and `runOnNotReady:` to POST stream-ended. See docs/routing.md.
-    # TODO (M5): add `runOnReady:` snapshotter for latest-frame JPEG.
+    # TODO (M6): add `runOnReady:` snapshotter for latest-frame JPEG.

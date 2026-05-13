@@ -27,24 +27,28 @@ lifecycle events back to `upstream-api-server`.
 upstream-agent  ──SRT publish──▶  upstream-streaming-server  ──fanout──▶  consumers
                                           │
                                           ├── (M4) validate session JWT with upstream-api-server
-                                          ├── (M4) ffprobe-based media validation
-                                          ├── (M5) latest-frame JPEG snapshotter
-                                          ├── (M6) processor handoff
-                                          └── (M4) stream-started / stream-ended webhooks
+                                          ├── (M4) stream-started / stream-ended webhooks
+                                          ├── (M5) ffprobe-based media validation
+                                          ├── (M6) latest-frame JPEG snapshotter
+                                          └── (M7) processor handoff
 ```
 
 The agent always learns the SRT URL by calling
 `POST /v1/stream-sessions/start` on the API server — it does not hardcode the
 streaming server host. See `docs/architecture.md` for the long-form picture.
 
-## Milestone 1 scope
+## Milestone scope
 
-**This repo currently implements Milestone 1 only.** That means:
+**Implemented:** M1 (local MediaMTX SRT ingest) and M2 (API SRT URL
+compatibility).
 
-- MediaMTX runs locally via Docker Compose.
-- SRT publishes are accepted on UDP/8890.
-- Published streams are readable via RTSP and (basic) WebRTC.
-- Three smoke scripts prove the loop works on a developer laptop.
+- **M1** — MediaMTX runs locally via Docker Compose. SRT publishes are
+  accepted on UDP/8890. Published streams are readable via RTSP and (basic)
+  WebRTC. Three smoke scripts prove the loop works on a developer laptop.
+- **M2** — A new `scripts/publish_api_srt_url.sh` accepts an SRT URL
+  produced by `upstream-api-server` and publishes a test pattern to it
+  unchanged. The URL is treated as opaque (it contains the session JWT);
+  the script never echoes it. See "Milestone 2" below for the flow.
 
 The following are **explicitly NOT implemented yet** (each has its own design
 doc marking the boundary):
@@ -113,6 +117,53 @@ See `docs/troubleshooting.md`. Most common issues:
 - FFmpeg installed but without `libsrt` support.
 - Reader connects but no media — confirm publisher is still running and that
   `docker compose logs mediamtx` shows `is publishing`.
+
+## Milestone 2
+
+M2 proves that an SRT URL issued by `upstream-api-server`'s
+`POST /v1/stream-sessions/start` works **unchanged** with this server.
+**M2 does not implement auth or media validation** — it only proves URL
+compatibility. Auth lands in M4 (see `docs/stream-auth.md`); validation
+in M5 (see `docs/stream-validation.md`).
+
+### Required API-side prerequisite
+
+The API today hardcodes the ingest host as `ingest.upstream.tv:8890`
+(`upstream-api-server/src/upstream_api/services/session_lifecycle.py`,
+`_build_srt_url`). For local M2 testing, the API must be runnable with an
+env override so the returned `srt_url` points at `localhost:8890`. The
+exact change required is tracked in `docs/follow-ups.md` (FU-1).
+
+### Flow
+
+1. Start MediaMTX: `docker compose up -d`.
+2. Run `upstream-api-server` locally with the ingest host overridden to
+   `localhost`.
+3. Use the agent (or any authorized API client) to call
+   `POST /v1/stream-sessions/start`. Copy the returned `srt_url` into
+   your shell environment — **do not write it to disk**.
+4. Publish:
+   ```bash
+   export API_SRT_URL='srt://...'   # paste the API-issued URL here
+   ./scripts/publish_api_srt_url.sh
+   ```
+5. Verify in another terminal:
+   ```bash
+   STREAM_NAME=<the path that MediaMTX logs show> \
+     ./scripts/inspect_stream.sh
+   ```
+6. Stop the session via `POST /v1/stream-sessions/{session_id}/stop`.
+
+### Security rules (M2)
+
+- **Never commit an SRT URL or session token.** They are equivalent to
+  a short-lived password.
+- **Never paste a real SRT URL into a doc, issue, PR, or chat.**
+- The script prints only a redacted `host:port` confirmation. It never
+  echoes the full URL.
+- FFmpeg's own error output may print the SRT URL on a connection
+  failure — that is a tool-level constraint. Scrub any logs you share.
+  See `docs/troubleshooting.md` for what to do if a URL leaks.
 
 ## Repo layout
 
