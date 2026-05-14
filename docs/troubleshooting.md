@@ -161,7 +161,10 @@ to resolve `ingest.upstream.tv` and fails.
 Fix: the deployed `upstream-api-server` must return a reachable ingest
 host/port (the env-driven override that was tracked as FU-1, resolved
 during M3). Confirm the response from `POST /v1/stream-sessions/start`
-contains a host you can `dig` or `ping` from the agent machine.
+contains a host you can `dig` or `ping` from the agent machine. The
+deployed API should now issue URLs against `ingest.upstreamcv.com:18890`.
+If you still see the old hostname in the URL, the API config is stale —
+see "Public ingest hostname (DNS) issues" below.
 
 ### `streamid value is too long`
 
@@ -216,6 +219,71 @@ it only sees whatever bytes FFmpeg sends it. Diagnose in the
 `upstream-agent` repo: check macOS Privacy & Security → Camera
 permissions, ensure Camo (or whichever virtual camera) is running, and
 verify the device appears in `ffmpeg -f avfoundation -list_devices true -i ""`.
+
+## Public ingest hostname (DNS) issues
+
+These all assume mode B (publishing to the shared/dev ingest server via
+the canonical public hostname `ingest.upstreamcv.com`). See
+`docs/local-dev.md` for the mode-A vs mode-B split.
+
+### `ingest.upstreamcv.com` does not resolve
+
+```bash
+nslookup ingest.upstreamcv.com
+```
+
+Expected: an A record (currently `<ingest-ip>`). If the lookup fails:
+
+- Check the DNS record at the registrar / DNS provider.
+- Try a public resolver: `nslookup ingest.upstreamcv.com 1.1.1.1`.
+- If the public resolver succeeds but your local one fails, the issue
+  is on your machine / network DNS, not the canonical record.
+
+### SRT to `ingest.upstreamcv.com:18890` fails
+
+Run through in order:
+
+1. DNS resolves (see above).
+2. UDP/18890 is forwarded/open on the network in front of the ingest
+   server. NAT routers don't forward UDP by default.
+3. Docker on the server maps `18890 -> 8890/udp` (`docker compose ps`
+   on the server should show `0.0.0.0:18890->8890/udp`).
+4. MediaMTX logs show `[SRT] listener opened on :8890`
+   (`docker compose logs mediamtx | grep SRT`).
+5. On the server, watch for inbound UDP:
+   ```bash
+   sudo tcpdump -ni any udp port 18890
+   ```
+   If you see packets but MediaMTX shows no publisher, the issue is
+   MediaMTX-side (check logs for path-name or auth errors). If you
+   see no packets at all, it's network/forwarding-side.
+
+### API still returns SRT URLs pointing at `ingest.upstream.tv`
+
+Meaning: the deployed `upstream-api-server` is still using the old
+hostname/config. The agent passes the URL through unchanged, so the
+agent-side resolve fails.
+
+Fix: update `upstream-api-server`'s ingest-host configuration to
+`ingest.upstreamcv.com`. This is owned by the API repo, not this one.
+See `docs/follow-ups.md` FU-1 for the historical context.
+
+### API returns SRT URLs pointing at the raw IP `<ingest-ip>`
+
+It will still publish successfully (the IP is the A-record value),
+but prefer the canonical hostname `ingest.upstreamcv.com` so that
+moving the ingest node only requires a DNS update rather than an API
+redeploy.
+
+### Hostname status reference
+
+- `ingest.upstream.tv` — old / broken hostname (never resolved
+  correctly in production). Retained in this repo only as history.
+- `<ingest-ip>` — raw public IP previously used in some examples
+  before DNS was set up. Currently the value `ingest.upstreamcv.com`
+  resolves to.
+- `ingest.upstreamcv.com` — canonical public ingest hostname going
+  forward.
 
 ## How to see everything at once
 

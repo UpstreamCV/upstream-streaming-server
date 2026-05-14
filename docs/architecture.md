@@ -110,7 +110,7 @@ upstream run
                                                             │
                   returns srt_url (short streamid) ◀────────┘
   └── exec ffmpeg
-       └── H264/MPEG-TS over SRT ───────────────────────────────────────▶ MediaMTX (UDP/18890 on server)
+       └── H264/MPEG-TS over SRT ───────────────────────────────────────▶ MediaMTX (ingest.upstreamcv.com:18890 → container :8890)
                                                                             │
                                                                             ├── path sess_<short-id>
                                                                             │     source.type: srtConn
@@ -139,10 +139,17 @@ The streaming server is **horizontally scalable but not unlimited on one
 node.** A single MediaMTX instance can serve many concurrent SRT publishers,
 but eventually one node is not enough — both for raw throughput and for
 fault isolation. The API will eventually be responsible for choosing an
-ingest node and minting the SRT URL for that specific node. That selection
-logic is not present today; the API hardcodes one ingest host. See
-`docs/follow-ups.md` FU-1 for the immediate "make the host configurable"
-step; node selection itself is a later milestone.
+ingest node and minting the SRT URL for that specific node.
+
+Today the API issues SRT URLs against the canonical public hostname
+`ingest.upstreamcv.com`, whose DNS A record points at the current ingest
+server's public IP. Moving traffic to a different ingest node is therefore
+a DNS update, not an API redeploy. Choosing between *multiple* concurrent
+ingest nodes (so the API mints per-session URLs that target a specific
+node) is still future work. The agent does not hardcode the ingest
+hostname — it uses whatever `srt_url` the API returns. See
+`docs/follow-ups.md` FU-1 for the historical "make the host configurable"
+step (resolved); per-node selection itself is a later milestone.
 
 ## What changes in each future milestone
 

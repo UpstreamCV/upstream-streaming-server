@@ -72,7 +72,11 @@ attaching to a path whose name is `<jwt>` (long), and
 streamid to a short `sess_<short-id>` stream key, so M3 path names are
 short (e.g. `sess_2a88f3405d513c05`) rather than full JWTs. The
 verification recipe above still holds with `STREAM_NAME=sess_<short-id>`
-in place of `<jwt>`.
+in place of `<jwt>`. Additionally, the canonical public ingest hostname
+is now `ingest.upstreamcv.com` (DNS-fronted). The old `ingest.upstream.tv`
+hostname is retained in this doc only as history; see
+`docs/troubleshooting.md` "Public ingest hostname (DNS) issues" for
+current diagnostics.
 
 ---
 

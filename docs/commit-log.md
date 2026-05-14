@@ -245,3 +245,68 @@ verify the session JWT (via the short stream key → JWT mapping the
 API now stores), accepts or rejects the publish based on the response,
 and posts `stream-started` / `stream-ended` / `validation-failed`
 lifecycle webhooks. See `docs/stream-auth.md` for the contract.
+
+---
+
+## DNS ingest hostname update — `ingest.upstreamcv.com`
+
+**Date:** 2026-05-13
+**Scope:** Documentation-only cleanup. Adopt the canonical public ingest
+hostname `ingest.upstreamcv.com` across active docs/examples/runbooks.
+No code, config, or container changes in this repo.
+
+### Added
+
+- `README.md` — new "Public ingest (current server deployment)" section:
+  canonical host `ingest.upstreamcv.com`, public SRT port `18890/udp`,
+  manual FFmpeg publish example using `streamid=publish:dnstest`, the
+  shape of API-issued SRT URLs
+  (`srt://ingest.upstreamcv.com:18890?streamid=publish:sess_<short-id>&latency=<ms>`),
+  and a hostname status reference (canonical / raw IP / old broken).
+- `docs/local-dev.md` — reframed the local-vs-server section into two
+  named modes (A: local-only developer machine; B: shared/dev ingest
+  server) and added a `nslookup` + manual SRT smoke + HTTP-API verify
+  recipe for mode B.
+- `docs/troubleshooting.md` — new "Public ingest hostname (DNS) issues"
+  section with four entries (DNS doesn't resolve, SRT to canonical
+  host fails, API still returns old hostname, API returns raw IP) plus
+  a hostname status reference.
+
+### Changed
+
+- `docs/architecture.md` — M3 ASCII diagram now shows
+  `ingest.upstreamcv.com:18890 → container :8890`. Horizontal-scaling
+  note rewritten: DNS-fronted canonical hostname; node selection is
+  still future work; the agent does not hardcode the hostname.
+- `docs/follow-ups.md` — FU-1 stays resolved; addendum notes the
+  canonical hostname is now `ingest.upstreamcv.com`. FU-2 (M4
+  validate-stream widening) remains the only open follow-up.
+
+### Verification
+
+- DNS verified from a Mac: `nslookup ingest.upstreamcv.com` →
+  `<ingest-ip>` (the current ingest server's public IP).
+- Manual SRT publish verified:
+  `srt://ingest.upstreamcv.com:18890?streamid=publish:dnstest&latency=1500`
+  — FFmpeg connected and streamed successfully into MediaMTX.
+- `bash -n scripts/*.sh` — clean.
+- `docker compose config` — unchanged from M3 (no compose edits in
+  this entry).
+
+### Not in this milestone
+
+- No code, container, or MediaMTX config changes.
+- No changes to `upstream-api-server`. The API repo is responsible for
+  issuing SRT URLs that use `ingest.upstreamcv.com` rather than the
+  old `ingest.upstream.tv` or the raw IP. If the API still returns the
+  old hostname, that's a sibling-repo fix; see
+  `docs/troubleshooting.md` "API still returns SRT URLs pointing at
+  `ingest.upstream.tv`".
+- No agent-side changes. The agent uses whatever `srt_url` the API
+  returns.
+
+### Next milestone
+
+**M4 — ingest auth and session validation.** Unchanged by this DNS
+update. See `docs/follow-ups.md` FU-2 for the API-side response
+widening that still blocks M4 on this server.

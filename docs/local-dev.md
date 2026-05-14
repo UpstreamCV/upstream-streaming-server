@@ -102,7 +102,9 @@ Historically `upstream-api-server` hardcoded the ingest host as
 returned `srt_url` points at a reachable host/port and uses a short
 stream key (e.g. `sess_<short-id>`). See `docs/follow-ups.md` FU-1
 (resolved) for history. No special env override is required on this
-server's side — the API-issued URL works unchanged.
+server's side — the API-issued URL works unchanged. The canonical
+public ingest host going forward is `ingest.upstreamcv.com`
+(DNS-fronted); `ingest.upstream.tv` is the old broken hostname.
 
 ### Local M2 flow
 
@@ -214,31 +216,79 @@ RTSP_PORT=<RTSP_PORT> STREAM_NAME=<PATH_NAME> ./scripts/inspect_stream.sh
 Expected: `codec_name=h264`, `width=1280`, `height=720`,
 `pix_fmt=yuv420p`.
 
-### Port differences: local dev vs. server deployment
+### Two ingest modes
 
 The same MediaMTX container is used in both, but the host-side port
-mappings differ. Always check `docker compose ps` for the actual host
-ports in your environment.
+mappings and the hostname differ. Always check `docker compose ps` for
+the actual host ports in your environment.
 
-| Protocol            | Local dev (container default) | Current server deployment (host) |
-|---------------------|--------------------------------|-----------------------------------|
-| SRT ingest (UDP)    | `8890`                         | `18890`                           |
-| RTSP read (TCP)     | `8554`                         | `18554`                           |
-| MediaMTX HTTP API   | `9997`                         | `19997`                           |
-| WebRTC HTTP (TCP)   | `8889`                         | `8889`                            |
-| WebRTC ICE (UDP)    | `8189`                         | `8189`                            |
+**A. Local-only developer machine.** MediaMTX runs from
+`docker-compose.yml` on your laptop. Publish to:
+
+- `srt://localhost:8890?streamid=publish:test&latency=200` (using
+  `scripts/smoke_publish_srt.sh`, or the API with the ingest-host
+  override pointing at `localhost`).
+
+**B. Shared / dev ingest server (current deployment).** Publish to
+the canonical public host:
+
+- SRT publish target: `srt://ingest.upstreamcv.com:18890?streamid=publish:<short-stream-key>&latency=<ms>`
+- RTSP inspect on the server (host-side mapping): host port `18554`
+- MediaMTX HTTP API on the server: host port `19997`
+
+| Protocol            | Local dev (container default) | Shared/dev server (host) |
+|---------------------|--------------------------------|---------------------------|
+| SRT ingest (UDP)    | `8890`                         | `18890`                   |
+| RTSP read (TCP)     | `8554`                         | `18554`                   |
+| MediaMTX HTTP API   | `9997`                         | `19997`                   |
+| WebRTC HTTP (TCP)   | `8889`                         | `8889`                    |
+| WebRTC ICE (UDP)    | `8189`                         | `8189`                    |
 
 `scripts/inspect_stream.sh` reads `RTSP_HOST` (default `localhost`),
 `RTSP_PORT` (default `8554`), and `STREAM_NAME` (default `test`). To
 inspect a stream on the current server deployment:
 
 ```bash
-RTSP_PORT=18554 STREAM_NAME=sess_<short-id> ./scripts/inspect_stream.sh
+RTSP_HOST=<server> RTSP_PORT=18554 STREAM_NAME=sess_<short-id> \
+  ./scripts/inspect_stream.sh
 ```
 
 If you see `404 Not Found` from RTSP but the MediaMTX HTTP API shows a
 ready path, you are almost certainly pointed at the wrong RTSP host
 port — re-check `docker compose ps`.
+
+### Public ingest DNS / hostname smoke (mode B only)
+
+Confirm DNS:
+
+```bash
+nslookup ingest.upstreamcv.com
+```
+
+Expected: an A record pointing at the current ingest server IP (the
+deployed value is `<ingest-ip>`; this may change if the ingest node
+is moved).
+
+Confirm UDP/18890 reachability via a manual SRT publish (no API
+involved — uses the literal `streamid=publish:dnstest`):
+
+```bash
+ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 \
+  -c:v libx264 -preset veryfast -tune zerolatency \
+  -pix_fmt yuv420p \
+  -b:v 3000k \
+  -f mpegts \
+  "srt://ingest.upstreamcv.com:18890?streamid=publish:dnstest&latency=1500"
+```
+
+Verify on the server:
+
+```bash
+curl -s http://<server>:19997/v3/paths/list | python3 -m json.tool
+```
+
+Expected: a path `dnstest` with `source.type: "srtConn"`,
+`ready: true`, `bytesReceived` increasing.
 
 ### Tear down
 

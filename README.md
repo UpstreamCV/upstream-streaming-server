@@ -93,6 +93,50 @@ docker compose up -d
 docker compose down
 ```
 
+## Public ingest (current server deployment)
+
+The Quickstart above is laptop-local. The shared / dev ingest server is
+reachable from the public internet via a DNS-fronted hostname:
+
+- **Canonical public ingest host:** `ingest.upstreamcv.com`
+- **Public SRT port:** `18890/udp` (Docker maps host `18890` → container
+  `8890/udp`; see `docker-compose.yml`).
+- **DNS:** `ingest.upstreamcv.com` currently resolves to the ingest
+  server's public IP. Verify with `nslookup ingest.upstreamcv.com`.
+
+Manual SRT publish (DNS / port-forward smoke, no API involved):
+
+```bash
+ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 \
+  -c:v libx264 -preset veryfast -tune zerolatency \
+  -pix_fmt yuv420p \
+  -b:v 3000k \
+  -f mpegts \
+  "srt://ingest.upstreamcv.com:18890?streamid=publish:dnstest&latency=1500"
+```
+
+The `upstream-api-server` is the system of record for which ingest host
+appears in issued SRT URLs. For the current deployment it should issue
+URLs shaped like:
+
+```
+srt://ingest.upstreamcv.com:18890?streamid=publish:sess_<short-id>&latency=<ms>
+```
+
+The agent does **not** hardcode this hostname; it uses whatever `srt_url`
+the API returns.
+
+Hostname status reference (see `docs/troubleshooting.md` for full
+context):
+
+- `ingest.upstreamcv.com` — canonical public ingest hostname going
+  forward.
+- `<ingest-ip>` — raw public IP the canonical hostname currently
+  resolves to. May change if the ingest node moves; prefer the
+  hostname.
+- `ingest.upstream.tv` — old / broken hostname (never resolved
+  correctly in production). Retained in this repo only as history.
+
 ## What success looks like
 
 - `docker compose logs mediamtx` shows lines containing
@@ -194,7 +238,8 @@ upstream-agent  →  upstream-api-server  →  API-issued SRT URL  →  FFmpeg/S
   `upstream-api-server`.
 - The API returned a reachable SRT URL with a **short** stream key
   (e.g. `sess_<short-id>`) — not a full JWT in `streamid`, and not
-  pointing at the old `ingest.upstream.tv` host.
+  pointing at the old `ingest.upstream.tv` host (canonical host is
+  now `ingest.upstreamcv.com`).
 - FFmpeg (launched by the agent) streamed H264/MPEG-TS over SRT to
   MediaMTX.
 - MediaMTX's HTTP API reported the path as `ready: true`,
@@ -210,8 +255,10 @@ upstream-agent  →  upstream-api-server  →  API-issued SRT URL  →  FFmpeg/S
 The live API leg of M2 was previously blocked by two API-side issues.
 M3 confirms both have been fixed in `upstream-api-server`:
 
-- The API used to hardcode `ingest.upstream.tv` as the ingest host.
-  It now returns a reachable host/port.
+- The API used to hardcode `ingest.upstream.tv` (which did not resolve).
+  The deployed API now returns a reachable host/port; the canonical
+  public host going forward is `ingest.upstreamcv.com` (DNS A → current
+  ingest server IP).
 - The API used to put the full session JWT into the SRT `streamid`,
   which exceeded SRT's streamid length limit. It now returns a short
   stream key (e.g. `sess_<short-id>`) and persists the JWT ↔ stream-key
