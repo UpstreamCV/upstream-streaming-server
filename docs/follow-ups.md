@@ -109,6 +109,72 @@ caller receives an `allowed=true` response with the four IDs and an
 
 ---
 
+## FU-3 — Read-path authentication for browser playback
+
+**Status:** **resolved** (2026-05-13). Implemented via api-server WHEP
+proxy — see `../upstream-api-server/docs/commit-log.md` entry dated
+2026-05-13 and `docs/stream-auth.md` "Read-path auth (resolved)"
+section in this repo. No code or config changes were needed here; the
+api-server now sits in the WHEP signaling path and enforces
+account-scoped auth via the existing `CurrentCaller` dependency.
+
+**Operational follow-up (not tracked as a separate FU):** production
+deploys MUST firewall MediaMTX's `8889/tcp`, `8554/tcp`, and
+`9997/tcp` to the api-server's egress IP only. The `8189/udp` port
+stays public for ICE media. The `mediamtx.yml` config remains
+intentionally permissive — auth is enforced at the network boundary,
+not in MediaMTX itself. See `docs/stream-auth.md` for the table.
+
+The historical description below is retained for context.
+
+---
+
+### Original (historical) description
+
+**Context:** As of `../upstream-dashboard/docs/commit-log.md` (entry
+dated 2026-05-13), the dashboard makes unauthenticated WHEP POSTs
+against `http://<this-server>:8889/<path>/whep` to render live video.
+MediaMTX's `authInternalUsers` in `mediamtx/mediamtx.yml` currently
+allows any reader. This is fine for local dev — and fine on the public
+internet **only if the read ports are firewalled to the dashboard's
+egress IP**. Until this follow-up ships, do not open `8889/tcp`,
+`8189/udp`, or `8554/tcp` to `0.0.0.0`.
+
+**Two leading approaches** (full design tradeoffs in
+`docs/stream-auth.md` under "Read-path auth"):
+
+1. **`authHTTP` → api-server.** MediaMTX `authHTTP` callback to a new
+   api-server endpoint (e.g. `POST /v1/ingest/validate-read`) that
+   takes a Supabase JWT + requested path and returns accept/reject.
+2. **Signed playback tokens.** The api-server mints a per-session
+   viewer token at `stream-session.start` time, the dashboard attaches
+   it to the WHEP POST, MediaMTX `runOnConnect` (or a future
+   `runOnRead`) calls back to verify.
+
+**Required touch points (either approach):**
+
+- `mediamtx/mediamtx.yml` — replace the permissive `authInternalUsers`
+  read entry with `authHTTP` or `runOnConnect` configuration; keep the
+  publisher-side gate independent (ingest still uses M4's `runOnReady`
+  + `validate-stream`).
+- `upstream-api-server` — new validate-read endpoint mirroring the
+  shape and shared-secret gating of `/v1/ingest/validate-stream`. If
+  approach (2), also extend `StreamSession` to surface the viewer
+  token + the WHEP URL (avoids the dashboard hard-coding the
+  streamid → path convention).
+- `upstream-dashboard/src/lib/webrtc/whep-client.ts` — attach the
+  token to the WHEP POST (query param or header, depending on the
+  approach picked). `src/components/stream/live-stream-player.tsx`
+  may need to refresh the token on a 401 if approach (2) is chosen.
+
+**Verification once shipped:** unauthenticated WHEP POSTs return 401;
+the dashboard, signed into a workspace, can play live video for cameras
+in that workspace; cross-account playback attempts fail at the api-server
+auth call, not at the streaming-server. WebRTC ICE negotiation continues
+to use direct UDP (no proxying through the api-server).
+
+---
+
 ## How to add a new follow-up
 
 One entry per item, in `FU-<n>` order. Required: status, blocking

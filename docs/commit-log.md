@@ -4,6 +4,89 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-13 — Read-path auth via api-server WHEP proxy (cross-repo, resolves FU-3)
+
+**Type:** docs + smoke-script changes in this repo, paired with feature
+commits in `upstream-api-server` and `upstream-dashboard`.
+
+**What changed elsewhere:** the dashboard's WHEP signaling now flows
+through `upstream-api-server` (`POST /v1/stream-sessions/{id}/whep` +
+`DELETE /v1/stream-sessions/{id}/whep/{resource_id}`), which enforces
+account-scoped auth via the existing `CurrentCaller` dependency. UDP/ICE
+media still goes direct from browser to MediaMTX. See
+`../upstream-api-server/docs/commit-log.md` and
+`../upstream-dashboard/docs/commit-log.md` (both 2026-05-13).
+
+**What changed here:**
+- `docs/stream-auth.md` — rewrote the "Read-path auth" section to
+  describe the implemented design (api-server proxy chosen, no MediaMTX
+  config changes). Added a production firewall posture table.
+- `docs/follow-ups.md` — marked **FU-3 as resolved**; retained the
+  historical "open design" description for context.
+- `scripts/smoke_whep_read.sh` (NEW) — curl-based smoke that POSTs a
+  canned SDP offer to `:8889/<path>/whep`, verifies the response shape
+  (status, Content-Type, body, Location), then DELETEs the resource.
+  Mirrors the style of the existing `smoke_publish_srt.sh` and
+  `smoke_read_stream.sh` scripts. Useful for catching "MediaMTX isn't
+  reachable" / "WHEP isn't enabled" / "path doesn't exist" without
+  opening a browser.
+- `scripts/fixtures/canned-whep-offer.sdp` (NEW) — minimal recvonly
+  video+audio SDP offer for the smoke script. Zeroed fingerprint and
+  dummy ICE creds — MediaMTX answers but no media flows. The smoke
+  tests plumbing, not the real WebRTC handshake.
+
+**No `mediamtx.yml` or `docker-compose.yml` changes.** The chosen design
+deliberately keeps MediaMTX permissive locally and relies on a
+production firewall around its read ports. The api-server is the only
+trusted client in production.
+
+**Production firewall posture (REQUIRED).** See
+`docs/stream-auth.md` "Production deploy posture" — `8889/tcp`,
+`8554/tcp`, `9997/tcp` must be unreachable from the public internet,
+api-server-only. `8189/udp` (ICE media) stays public.
+
+**Verification:**
+- With `docker compose up -d` + `bash scripts/smoke_publish_srt.sh` in
+  one terminal, run `bash scripts/smoke_whep_read.sh` in another — it
+  exits 0 if the WHEP read path is healthy.
+
+---
+
+## 2026-05-13 — Dashboard now consumes the WHEP read path (cross-repo)
+
+**Type:** docs-only change in this repo, paired with a feature commit in
+`upstream-dashboard`.
+
+**What changed elsewhere:** `upstream-dashboard` shipped a WHEP-based
+`<LiveStreamPlayer>` that POSTs SDP offers to
+`http://<this-server>:8889/<path>/whep` to render live video on the
+camera detail page. See `../upstream-dashboard/docs/commit-log.md`
+entry dated 2026-05-13 for the full design and file list.
+
+**What changed here:**
+- `docs/stream-auth.md` — added a new top-level section "Read-path auth
+  (separate from ingest auth)" and updated the status banner. Documents
+  that M1's permissive `authInternalUsers` is now actively exercised by
+  the dashboard, what production deploys need to do until read-path auth
+  ships (firewall the read ports), and the two leading design options.
+- `docs/follow-ups.md` — added **FU-3 — Read-path authentication for
+  browser playback**. Names touch points across `mediamtx/mediamtx.yml`,
+  `upstream-api-server` (new validate-read endpoint), and
+  `upstream-dashboard/src/lib/webrtc/whep-client.ts`.
+
+**No code changes** in this repo — the dashboard works against the
+existing M1 read path. The WHEP/ICE/RTSP ports, the catch-all path
+config, and the authInternalUsers entry are unchanged.
+
+**Verification:** with `docker compose up` in this repo and a publishing
+agent, open `/dashboard/cameras/<id>` in the dashboard — the new
+`<LiveStreamPlayer>` connects to `:8889/<stream_path>/whep`,
+`curl localhost:9997/v3/paths/list` shows a second reader on the path
+while the page is open, and tearing the page down (close tab, navigate
+away, hide tab) frees that reader within the ICE timeout.
+
+---
+
 ## Milestone 1 — Local MediaMTX SRT ingest
 
 **Date:** 2026-05-13

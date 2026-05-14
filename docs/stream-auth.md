@@ -1,9 +1,87 @@
 # Stream authentication
 
-> **Status: NOT IMPLEMENTED IN MILESTONES 1 OR 2.**
+> **Status: INGEST auth is NOT IMPLEMENTED IN MILESTONES 1 OR 2.**
 > M1 set up the local MediaMTX. M2 proved that an API-issued SRT URL
-> works unchanged but did NOT validate it. Auth lands in M4.
+> works unchanged but did NOT validate it. Ingest auth lands in M4.
 > This document is the contract M4 will implement against.
+>
+> **READ-PATH auth has shipped (2026-05-13)** via the api-server WHEP
+> proxy — the dashboard's browser playback now flows through the
+> api-server, which enforces account-scoped read auth. See the
+> "Read-path auth (resolved)" section below. MediaMTX itself remains
+> permissive on the read path; production deploys close the gap with
+> a firewall.
+
+## Read-path auth (resolved)
+
+**Implemented:** 2026-05-13. The api-server proxies WebRTC signaling
+between authenticated dashboard users and this MediaMTX, enforcing
+that the caller is a member of the stream's account. UDP/ICE media
+still flows browser ↔ MediaMTX directly — only the HTTP signaling
+makes the api-server hop. Closes FU-3 in `docs/follow-ups.md`.
+
+### Flow
+
+1. Dashboard user opens `/dashboard/cameras/<id>` and is signed into a
+   workspace via Supabase Auth.
+2. `<LiveStreamPlayer>` POSTs the SDP offer to
+   `/api/upstream/v1/stream-sessions/<session_id>/whep`, which is the
+   dashboard's catch-all proxy at the same origin.
+3. The dashboard proxy attaches the Supabase JWT server-side and
+   forwards to `upstream-api-server` at
+   `POST /v1/stream-sessions/<session_id>/whep`.
+4. The api-server runs `CurrentCaller` (Supabase JWT or agent token),
+   verifies the session belongs to the caller's account, verifies
+   `state == streaming`, then forwards the SDP offer to this MediaMTX
+   at `POST :8889/<path>/whep`.
+5. The api-server returns MediaMTX's SDP answer + a bare resource id
+   in the `Location` header. The browser uses ICE candidates from the
+   answer to establish a direct UDP connection to MediaMTX on
+   `8189/udp`.
+6. On teardown the browser sends `DELETE
+   /api/upstream/v1/stream-sessions/<session_id>/whep/<resource_id>`
+   which proxies through to this MediaMTX.
+
+### What this means for MediaMTX (this repo)
+
+**No code or config changes were made.** `mediamtx.yml` still has the
+permissive `authInternalUsers` block that grants `read` + `playback`
+to any caller. This is intentional — the api-server is the only client
+in the trust boundary, and adding MediaMTX-side auth would require
+either a shared secret with the api-server or a runtime hook back into
+the api-server. The simpler design is **firewall the read ports to the
+api-server only**.
+
+### Production deploy posture (REQUIRED)
+
+The api-server proxy only authorizes requests it sees. **MediaMTX's
+read ports must not be reachable from the public internet** — anyone
+who can hit them directly bypasses auth.
+
+Required firewall posture in production:
+
+| Port | Transport | Posture |
+|---|---|---|
+| `8889/tcp` | WHEP/WebRTC signaling | api-server only |
+| `8554/tcp` | RTSP | api-server only (or disable entirely) |
+| `9997/tcp` | MediaMTX HTTP API | api-server only (or disable in `mediamtx.yml`) |
+| `8189/udp` | WebRTC ICE/media | **public** (browsers connect direct) |
+| `18890/udp` | SRT ingest | public (agent publishers; M4 will add JWT auth here) |
+
+For Docker-on-EC2 deploys: bind `8889`, `8554`, `9997` to the host's
+internal interface only (e.g. `127.0.0.1:8889:8889/tcp` instead of
+`8889:8889/tcp` in `docker-compose.yml`), then have the api-server
+reach this server via SSH tunnel or a private network.
+
+For Kubernetes deploys: use a `ClusterIP` service for the read ports
+and a `NodePort` / `LoadBalancer` only for `8189/udp`.
+
+### What is intentionally NOT in this repo
+
+Same exclusions as ingest auth: no token signing, no account
+authorization logic, no token rotation. The api-server owns all of
+those. This repo's job ends at "be a media server" — it does not need
+to know about Supabase, accounts, or users.
 
 ## Future model (M4)
 
