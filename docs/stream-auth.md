@@ -1,6 +1,6 @@
 # Stream authentication
 
-> **Status (2026-05-13):**
+> **Status (2026-05-14):**
 >
 > - **INGEST lifecycle webhooks have SHIPPED** in M4: `runOnReady` /
 >   `runOnNotReady` hooks in `mediamtx/mediamtx.yml` POST to the api-server's
@@ -8,13 +8,15 @@
 >   `/v1/ingest/stream-ended`. Sessions transition `approved → streaming →
 >   ended` and `cameras.status` mirrors the lifecycle. See
 >   `docs/commit-log.md` 2026-05-13 M4 entry.
-> - **INGEST auth (deny gate) is NOT YET IMPLEMENTED.** The catch-all path
->   still accepts any streamid; we have not wired `runOnConnect` →
->   `validate-stream` as a deny gate. Tracked as **FU-4** in
->   `docs/follow-ups.md`. Mitigation today: stream keys are 16 hex chars,
->   minted by the API only after agent auth, and SRT ingest is the only
->   public surface — but anyone who learns a streamid can publish to that
->   path until FU-4 lands.
+> - **INGEST auth (deny gate) — streaming-server side SHIPPED** in M4.1:
+>   MediaMTX `authMethod: http` POSTs every SRT publish attempt to
+>   `${UPSTREAM_API_BASE_URL}/v1/ingest/mediamtx-auth/{secret}` and drops
+>   the connection on non-2xx before any media flows. The api-server
+>   endpoint is the remaining piece — see **FU-4** in
+>   `docs/follow-ups.md` and the "M4.1 ingest deny gate (canonical)"
+>   section below. The original M4 plan was to use `runOnConnect` →
+>   `validate-stream`; the M4 hook spike (commit-log) disproved that —
+>   MediaMTX 1.9.3 hooks cannot deny SRT publishers.
 > - **READ-PATH auth has shipped (2026-05-13)** via the api-server WHEP
 >   proxy — the dashboard's browser playback now flows through the
 >   api-server, which enforces account-scoped read auth. See the
@@ -22,8 +24,10 @@
 >   permissive on the read path; production deploys close the gap with
 >   a firewall.
 >
-> The "Future model (M4)" section below is retained as the canonical
-> contract for the deny-gate work (FU-4) when it ships.
+> The "M4.1 ingest deny gate (canonical)" section below is the source of
+> truth for the gate contract. The older "Future model (M4)" and "M4
+> validate-stream contract" sections describe the abandoned hook-based
+> plan and are kept only for historical context.
 
 ## Read-path auth (resolved)
 
@@ -106,7 +110,126 @@ authorization logic, no token rotation. The api-server owns all of
 those. This repo's job ends at "be a media server" — it does not need
 to know about Supabase, accounts, or users.
 
-## Future model (M4)
+## M4.1 ingest deny gate (canonical)
+
+This is the contract for the M4.1 publish-auth gate. The streaming-server
+side ships in M4.1; the api-server side is FU-4.
+
+### Wire layer
+
+MediaMTX 1.9.3 calls a single HTTP URL for every auth event via
+`authMethod: http`. Configuration in `mediamtx/mediamtx.yml`:
+
+- `authMethod: http`
+- `authHTTPAddress`: set via `MTX_AUTHHTTPADDRESS` env var in
+  `docker-compose.yml`, composed as
+  `${UPSTREAM_API_BASE_URL}/v1/ingest/mediamtx-auth/${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}`.
+  MediaMTX 1.9.3 does NOT expand `${VAR}` inside its own YAML, so the URL
+  must be composed by docker-compose and injected via the standard
+  `MTX_<KEY>` env-var override mechanism. Side benefit: the secret never
+  appears in the YAML file.
+- `authHTTPExclude: [api, metrics, pprof, read, playback]`. Only `publish`
+  hits the api-server in M4 — read/playback auth is later work.
+
+The secret rides in the URL path segment because MediaMTX 1.9.3 has no
+`authHTTPHeaders` support (added upstream in 1.11+). When MediaMTX is
+bumped to 1.11+, migrate the secret out of the path into a header so it
+stops appearing in URL access logs.
+
+### Request — `POST /v1/ingest/mediamtx-auth/{secret}`
+
+MediaMTX sends a fixed JSON body. The streaming server has no control
+over its shape (it's documented in `/mediamtx.yml.default`):
+
+```json
+{
+  "user": "",
+  "password": "",
+  "ip": "203.0.113.42",
+  "action": "publish",
+  "path": "sess_2a88f3405d513c05",
+  "protocol": "srt",
+  "id": "68a29640-8491-4edc-8461-d8966bc62c62",
+  "query": ""
+}
+```
+
+- `{secret}` (path segment) is the shared webhook secret. The api-server
+  must constant-time compare it against `Settings.mediamtx_webhook_secret`
+  via the existing `verify_shared_secret()` helper.
+- `action` is `"publish"` for SRT publish attempts. The other actions
+  (`read`, `playback`, `api`, etc.) are excluded by `authHTTPExclude`
+  and should not reach the endpoint, but be defensive.
+- `path` is the streamid suffix after the `publish:` prefix is stripped
+  by MediaMTX — i.e. the short stream key like `sess_<16 hex>`. To call
+  the existing `load_session_by_streamid()`, reconstruct the full
+  streamid as `f"publish:{path}"`.
+- `protocol` is `"srt"` for the M4.1 gate. Other protocols should be
+  denied.
+- `user`, `password`, `query` are empty for SRT publishes; do not branch
+  on them.
+
+### Response — accept
+
+HTTP **200** with empty body. MediaMTX accepts any 2xx; it does not parse
+a JSON envelope.
+
+### Response — deny
+
+HTTP **401** with empty body. (403 also denies, but 401 is canonical for
+this endpoint.)
+
+### Decision (api-server, for FU-4)
+
+1. `{secret}` mismatch → 401, no body, **no logging of presented value**.
+2. `action != "publish"` → 200 (defensive default; excluded by config).
+3. `protocol != "srt"` → 401.
+4. Empty `path` → 401.
+5. Reconstruct streamid as `f"publish:{path}"`. Call existing
+   `services/stream_validation.py:load_session_by_streamid()`.
+6. No session row → 401.
+7. `state != "approved"` → 401.
+8. `expires_at <= now()` → 401.
+9. Otherwise → 200.
+
+### Behavior rules (api-server)
+
+- **Fail-closed.** Database error, lookup timeout, or any unexpected
+  exception → 401 (deny). Do not retry into accept.
+- **Log identifiers, not secrets.** Log decision, `reason_code`,
+  `session_id`, `agent_id`, `camera_id`, `account_id`, `ip`. Never log:
+  the `{secret}` path segment, the raw URL, the raw body if it contains
+  a non-empty `password` or `query`.
+- **No body parsing for the deny case.** Returning 401 with empty body
+  is correct; do not leak `reason_code` to MediaMTX (it's an internal
+  log signal, not an authHTTP contract field).
+- **One call per publisher.** MediaMTX calls once per SRT handshake.
+  Do not re-validate on every keyframe.
+
+### Local verification harness
+
+`scripts/dev/mock_authhttp_server.py` is a stdlib HTTP server that
+implements just enough of this contract to test the streaming-server
+config in isolation:
+
+- Reads `UPSTREAM_MEDIAMTX_WEBHOOK_SECRET` from env, constant-time
+  compares against the path segment.
+- Allows any `path` listed in `MOCK_ALLOWED_PATHS` (comma-separated,
+  defaults to `allow-test`) when `action=publish` and `protocol=srt`.
+- Denies everything else.
+
+`scripts/smoke_authhttp_deny.sh` drives the end-to-end test: confirms
+the mock rejects a wrong secret, that a bogus streamid is denied at
+SRT handshake (max_frames=0), and that the mock-allowed streamid
+flows frames normally.
+
+The mock is dev-only and is NOT used in production — when the
+api-server endpoint ships, `UPSTREAM_API_BASE_URL` points at the real
+service and the mock is no longer needed.
+
+---
+
+## Future model (M4) — historical, superseded by M4.1 above
 
 1. `upstream-agent` calls `POST /v1/stream-sessions/start` on
    `upstream-api-server` with its agent API token. The API server:
@@ -159,11 +282,16 @@ unchanged — but MediaMTX still accepts any streamid because
 `paths.all_others.source: publisher` is the only entry in
 `mediamtx/mediamtx.yml`. Both behaviors change in M4.
 
-## M4 validate-stream contract (canonical)
+## M4 validate-stream contract — historical, superseded by M4.1 above
 
-This is the agreed contract for the call this streaming server will make
-into `upstream-api-server` when a publisher attaches in M4. The API team
-has confirmed they will widen the current response to match.
+The M4 hook spike disproved the premise of this section: MediaMTX 1.9.3
+hooks cannot deny SRT publishers, and the streamid is not available to
+`runOnConnect`. The actual deny gate uses `authHTTP` against
+`/v1/ingest/mediamtx-auth/{secret}` — see "M4.1 ingest deny gate
+(canonical)" above. `validate-stream` is retained as an internal
+helper used only by the M4 lifecycle hooks. Below is the original
+agreed contract for the call this streaming server was originally
+planned to make.
 
 ### Request — `POST /v1/ingest/validate-stream`
 

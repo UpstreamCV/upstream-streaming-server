@@ -1,13 +1,15 @@
 # MediaMTX configuration.
 #
 # M1 scope: accept SRT publishes locally, expose RTSP + WebRTC reads, and
-# surface a local HTTP API for inspection. No auth, no media validation.
+# surface a local HTTP API for inspection.
 # M4 (shipped): per-path `runOnReady` / `runOnNotReady` hooks call the API's
 # `/v1/ingest/lookup-session` to translate `MTX_PATH` -> `session_id`, then
 # POST `stream-started` / `stream-ended` so the dashboard can transition the
 # stream into the playable `streaming` state.
-# Auth on ingest (validate-stream as a runOnConnect deny gate) and ffprobe
-# enforcement (M5) remain deferred — see docs/follow-ups.md.
+# M4.1 (shipped): MediaMTX `authMethod: http` denies SRT publishers whose
+# session is missing/expired/wrong-state before any media flows. The api-
+# server endpoint is `/v1/ingest/mediamtx-auth/{secret}` — see docs/stream-auth.md.
+# ffprobe enforcement (M5) remains deferred — see docs/follow-ups.md.
 
 ###############################################################################
 # Logging
@@ -30,28 +32,39 @@ api: yes
 apiAddress: :9997
 
 ###############################################################################
-# Auth (M1: disabled — local dev only)
+# Auth (M4.1: SRT publish gated via api-server authHTTP)
 ###############################################################################
 
-# MediaMTX 1.9's default `authInternalUsers` restricts API/metrics/pprof to
-# the in-container loopback. Host-side requests come from the Docker bridge
-# and would be rejected with 401. For local dev we override with a fully
-# permissive set: any publisher/reader/API caller is allowed.
+# Every SRT publish attempt is POSTed to the api-server for validation
+# BEFORE any media bytes are accepted. On non-2xx the SRT connection is
+# dropped at handshake. Read/playback/api/metrics/pprof are excluded —
+# M4 scope is publish authorization only; reader auth is a later
+# milestone, and the local debug HTTP API on :9997 must stay reachable.
 #
-# TODO (M4): replace with real auth — either MediaMTX's `authHTTP` pointing
-# at `upstream-api-server`, or `authInternalUsers` entries that require an
-# admin password for the API and gate publish on a runOnConnect hook.
-authInternalUsers:
-  - user: any
-    pass:
-    ips: []
-    permissions:
-      - action: publish
-      - action: read
-      - action: playback
-      - action: api
-      - action: metrics
-      - action: pprof
+# The shared secret rides in the URL path segment because MediaMTX 1.9.3
+# has no `authHTTPHeaders` (added upstream in 1.11+). The URL itself is
+# NOT written to this file — MediaMTX 1.9.3 does not expand ${VAR}
+# references inside YAML, so docker-compose.yml composes the final URL
+# from $UPSTREAM_API_BASE_URL and $UPSTREAM_MEDIAMTX_WEBHOOK_SECRET and
+# passes it in as MTX_AUTHHTTPADDRESS, which MediaMTX picks up as the
+# override for authHTTPAddress. Keeping it out of YAML also keeps the
+# secret out of any image / committed file.
+#
+# Production deployments MUST configure their reverse-proxy / load
+# balancer to strip the trailing path segment from access logs so the
+# secret is not captured. See docs/stream-auth.md for the production
+# runbook and the api-server endpoint contract.
+#
+# When authMethod is `http`, `authInternalUsers` is ignored; excluded
+# actions are simply allowed without any check.
+authMethod: http
+# authHTTPAddress is set via MTX_AUTHHTTPADDRESS in docker-compose.yml.
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
+  - action: read
+  - action: playback
 
 ###############################################################################
 # Protocols
@@ -95,10 +108,10 @@ srtAddress: :8890
 ###############################################################################
 
 # Catch-all path: any publisher with streamid `publish:<name>` creates a
-# matching path on the fly. For dev smoke scripts the name is `test`; for
-# real API-issued sessions the name is the short opaque key `sess_<hex>`.
-# This is intentionally permissive on the auth side — see docs/stream-auth.md
-# for the production firewall posture and the deferred runOnConnect deny gate.
+# matching path on the fly. The name is the short opaque key `sess_<hex>`
+# minted by `upstream-api-server` at session start. authHTTP above rejects
+# any path that does not map to an approved, unexpired session row, so the
+# catch-all is safe even though no per-path auth is configured here.
 #
 # `runOnReady` fires when MediaMTX has finished SRT handshake + at least one
 # track is decodable. The hook ffprobes the local re-stream, looks up the

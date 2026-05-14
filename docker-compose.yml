@@ -18,6 +18,13 @@ services:
       dockerfile: Dockerfile
     container_name: upstream-mediamtx
     restart: unless-stopped
+    # MediaMTX's authHTTP (and the M4 lifecycle hooks) need to reach
+    # upstream-api-server. In local dev that's typically a host-side
+    # process at host.docker.internal:8000. Docker Desktop on macOS /
+    # Windows resolves that hostname automatically; this mapping is the
+    # Linux Docker Engine equivalent — harmless no-op on Docker Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Run as root inside the container; MediaMTX does not need extra caps for
     # the protocols enabled here.
     ports:
@@ -45,3 +52,10 @@ services:
       # Both must be set; hooks fail-loud (exit non-zero) if missing.
       UPSTREAM_API_BASE_URL: ${UPSTREAM_API_BASE_URL}
       UPSTREAM_MEDIAMTX_WEBHOOK_SECRET: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}
+      # M4.1 authHTTP deny gate. MediaMTX 1.9.3 does NOT expand ${VAR}
+      # references inside its own YAML, so the full URL (with the shared
+      # secret as a path segment) is composed by docker-compose here and
+      # passed in as MTX_AUTHHTTPADDRESS — MediaMTX's standard env-var
+      # override mechanism for any top-level config key. Keeping the URL
+      # out of mediamtx/mediamtx.yml keeps the secret out of the file.
+      MTX_AUTHHTTPADDRESS: ${UPSTREAM_API_BASE_URL}/v1/ingest/mediamtx-auth/${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}

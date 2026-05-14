@@ -68,13 +68,24 @@ compatibility), M3 (agent live smoke), and M4 (lifecycle webhooks).
   own image. Set `UPSTREAM_API_BASE_URL` and
   `UPSTREAM_MEDIAMTX_WEBHOOK_SECRET` in `.env` before
   `docker compose up --build`.
+- **M4.1** — SRT publish deny gate via MediaMTX `authMethod: http`.
+  Every SRT publish attempt is POSTed to
+  `${UPSTREAM_API_BASE_URL}/v1/ingest/mediamtx-auth/{secret}`; on non-2xx
+  the SRT connection is dropped at handshake, before any media flows.
+  The api-server endpoint is FU-4 — until it ships, a stand-in mock
+  (`scripts/dev/mock_authhttp_server.py`) covers local-dev verification
+  via `scripts/smoke_authhttp_deny.sh`. See `docs/stream-auth.md`
+  "M4.1 ingest deny gate (canonical)" for the contract. Replaces the
+  abandoned runOnConnect approach disproven by the M4 hook spike (see
+  `docs/commit-log.md`).
 
 The following are **explicitly NOT implemented yet** (each has its own design
 doc marking the boundary):
 
-- runOnConnect deny gate via `validate-stream` → `docs/stream-auth.md`
-  (FU-4 in `docs/follow-ups.md`; ingest is currently open to anyone who
-  guesses a streamid)
+- The api-server side of the M4.1 deny gate
+  (`/v1/ingest/mediamtx-auth/{secret}`) — FU-4 in
+  `docs/follow-ups.md`. Until it ships, production deploys will
+  fail-closed (deny everything) because the URL 404s.
 - Media format validation (ffprobe enforcement) → `docs/stream-validation.md` (M5)
 - Fanout to snapshotter / processor / recording → `docs/routing.md`
 - Production deployment / Kubernetes / multi-region

@@ -4,6 +4,81 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-14 — M4.1: ingest deny gate via MediaMTX authHTTP (streaming-server side)
+
+**Type:** behavior change. SRT publishers are now denied at handshake
+when the api-server says no, before any media flows. Streaming-server
+side is shipped; api-server endpoint is FU-4. Until that lands,
+production will fail-closed (deny everything) because the URL 404s.
+
+**Why the original M4 plan changed:** the M4 hook spike (also part of
+this commit-log entry) wired a temporary `runOnConnect` hook in
+`mediamtx/mediamtx.yml` and confirmed three things that falsified the
+original FU-4 plan:
+
+1. `runOnConnect` fires for SRT in 1.9.3 but its exit code is ignored —
+   non-zero does NOT deny the publish. ffmpeg published 180 frames
+   while the hook exited 1.
+2. The hook env contains `MTX_CONN_TYPE=srtConn` and `MTX_CONN_ID` but
+   **not** the streamid (`MTX_PATH` and `MTX_QUERY` are unset), so the
+   hook couldn't call `validate-stream` even if exit code mattered.
+3. `runOnPublish` does not exist in MediaMTX 1.9.3 — the loader rejects
+   it as an unknown field. The only per-path pre-media hook in 1.9.3 is
+   `runOnInit`, which is for sourcing streams, not validating
+   publishers.
+
+The documented MediaMTX 1.9.3 mechanism for denying a publisher before
+media flows is `authMethod: http` (authHTTP). The spike script was
+deleted; the production design uses authHTTP.
+
+**What shipped (this repo):**
+
+- `mediamtx/mediamtx.yml` — replaced the permissive `authInternalUsers`
+  block with `authMethod: http` + `authHTTPExclude` for
+  `api/metrics/pprof/read/playback`. The URL itself is composed by
+  `docker-compose.yml` and injected via `MTX_AUTHHTTPADDRESS` because
+  MediaMTX 1.9.3 does not expand `${VAR}` references inside its YAML.
+- `docker-compose.yml` — composes `MTX_AUTHHTTPADDRESS` from
+  `${UPSTREAM_API_BASE_URL}` + `${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}`,
+  adds `host.docker.internal:host-gateway` so Linux Docker Engine can
+  reach a host-side api-server.
+- `scripts/dev/mock_authhttp_server.py` — dev-only stdlib HTTP server
+  that implements just enough of the contract to test the streaming
+  server's config in isolation. Reads the same env secret, allows any
+  path in `MOCK_ALLOWED_PATHS` (default `allow-test`).
+- `scripts/smoke_authhttp_deny.sh` — end-to-end smoke test: confirms
+  bogus streamid is denied at SRT handshake with zero frames flowing,
+  and that the mock-allowed streamid passes through normally.
+- `docs/stream-auth.md` — added the "M4.1 ingest deny gate (canonical)"
+  section that documents the contract. The older "Future model (M4)"
+  and "M4 validate-stream contract" sections are now flagged as
+  historical / superseded.
+- `docs/follow-ups.md` — rewrote FU-4 to reflect the new design and
+  the remaining api-server work; updated FU-2 to note `validate-stream`
+  is no longer the deny-gate endpoint.
+- `README.md`, `.env.example` — references updated.
+
+**Why the secret rides in the URL path segment:** MediaMTX 1.9.3 has
+no `authHTTPHeaders` (added upstream in 1.11+). Path-segment was
+chosen over query string because reverse proxies generally strip path
+tails from access logs more reliably than query strings. When
+MediaMTX is bumped to 1.11+, migrate to a real header.
+
+**Verified locally:** `scripts/smoke_authhttp_deny.sh` against the
+mock — `PASS bogus streamid denied (ffmpeg exit=251, max_frames=0)` +
+`PASS allowed streamid accepted (max_frames=90)`. MediaMTX log line
+on deny: `[SRT] [conn ...] closed: authentication failed: server
+replied with code 401`.
+
+**Remaining (FU-4):** add `POST /v1/ingest/mediamtx-auth/{secret}` to
+`upstream-api-server`. Decision rules, request shape, and test
+patterns are documented in `docs/follow-ups.md` FU-4 and
+`docs/stream-auth.md`. Once it ships, rerun
+`scripts/smoke_authhttp_deny.sh` against the real api-server with a
+known-good `sess_<hex>` path.
+
+---
+
 ## 2026-05-14 — Firewall script for read-port lockdown (operational)
 
 **Type:** new operational script; no MediaMTX / docker-compose / config

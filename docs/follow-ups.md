@@ -82,12 +82,13 @@ current diagnostics.
 
 ## FU-2 — `upstream-api-server` `validate-stream` response widening
 
-**Status:** open (still relevant for the deferred runOnConnect deny gate;
-not blocking current functionality). **Was blocking** the original M4
-plan to use `validate-stream` as the deny gate at SRT connect time. M4
-shipped lifecycle webhooks via a separate `lookup-session` endpoint
-(see `docs/commit-log.md` 2026-05-13 M4 entry); the deny-gate work
-remains deferred and will need this widening when picked up.
+**Status:** open (relevant for M5 ffprobe enforcement; M4.1 ingest
+deny-gate uses a separate `mediamtx-auth` endpoint and does not need
+this widening). The original M4 plan was to reuse `validate-stream` as
+the deny gate, but the spike (see `docs/commit-log.md` M4.1 entry)
+proved hooks cannot deny SRT publishers, so the design shifted to
+MediaMTX `authHTTP` calling a new dedicated endpoint. `validate-stream`
+is now an internal helper used only by the M4 lifecycle hooks.
 
 **Where:** `upstream-api-server` — `POST /v1/ingest/validate-stream`
 endpoint and its response model.
@@ -114,31 +115,65 @@ caller receives an `allowed=true` response with the four IDs and an
 
 ---
 
-## FU-4 — runOnConnect deny gate for SRT publishers
+## FU-4 — Ingest deny gate (`mediamtx-auth` endpoint in api-server)
 
-**Status:** open. **Does not block** current functionality (M4
-lifecycle webhooks ship without it; `cameras.status` and the dashboard
-playback work fine), but **does** leave ingest open to anyone who
-guesses or scrapes a streamid (`sess_<16 hex>` — short enough that
-you wouldn't want it as your only protection).
+**Status:** partially shipped. Streaming-server side is done as M4.1
+(see `docs/commit-log.md`): MediaMTX `authMethod: http` now POSTs every
+SRT publish attempt to `${UPSTREAM_API_BASE_URL}/v1/ingest/mediamtx-auth/{secret}`
+and drops the connection on non-2xx, **before any media flows**.
+Verified locally with `scripts/smoke_authhttp_deny.sh` against
+`scripts/dev/mock_authhttp_server.py`. The **remaining work** is the
+real api-server endpoint — until it ships, the streaming server only
+denies when a stand-in service is reachable; the production deploy
+will fail-closed (deny everything) because the real URL 404s.
 
-**Where:** `upstream-streaming-server/mediamtx/mediamtx.yml` —
-catch-all `paths.all_others` block. Today: `runOnReady` /
-`runOnNotReady` only. Required: a `runOnConnect` (or `srtConnect`)
-hook that calls `POST /v1/ingest/validate-stream` with the streamid
-and exits non-zero on rejection so MediaMTX drops the SRT connection
-before any media flows.
+**Why the original plan changed:** the M4 hook spike (see
+`docs/commit-log.md` M4.1 entry) proved that MediaMTX 1.9.3 hooks
+cannot deny SRT publishers — `runOnConnect` fires but its exit code is
+ignored, the streamid is not in the hook env, and `runOnPublish` does
+not exist in 1.9.3. The documented mechanism is `authMethod: http`,
+which gates at SRT handshake before media is accepted.
 
-**Why deferred:** `validate-stream` returns the narrow shape today
-(see FU-2). A runOnConnect gate is fine with the current shape for
-deny/allow, but tying the deny gate to FU-2's widening means we ship
-both as one consistent change rather than rev the gate twice.
+**Where (remaining api-server work):** add
+`POST /v1/ingest/mediamtx-auth/{secret}` to `upstream-api-server`.
+Contract is documented in `upstream-streaming-server/docs/stream-auth.md`
+under "M4.1 ingest deny gate". Summary:
 
-**Verification once shipped:** publishing with a fabricated streamid
-(`srt://.../?streamid=publish:bogus_key&latency=200`) fails before
-ffmpeg sends any video; api-server logs show a `validate-stream`
-reject with `reason_code=session_not_found`. Real API-issued
-streamids continue to work.
+- `{secret}` is path-segment because MediaMTX 1.9.3 has no
+  `authHTTPHeaders` (added in 1.11+). Compare constant-time against
+  `Settings.mediamtx_webhook_secret`. Mismatch → 401, no body.
+- Body shape:
+  ```json
+  { "user": "...", "password": "...", "ip": "...",
+    "action": "publish|read|...", "path": "...",
+    "protocol": "rtsp|rtmp|hls|webrtc|srt",
+    "id": "...", "query": "..." }
+  ```
+- Decision (publish only — read/playback are excluded in
+  `mediamtx.yml`'s `authHTTPExclude` so they should not arrive here,
+  but be defensive):
+  1. `action != "publish"` → 200 (allow, defensive default).
+  2. `protocol != "srt"` → 401.
+  3. Empty `path` → 401.
+  4. Reconstruct streamid as `f"publish:{path}"` and call existing
+     `load_session_by_streamid()` in
+     `services/stream_validation.py:71`.
+  5. No session / `state != "approved"` / expired → 401.
+  6. Otherwise → 200 with empty body.
+- Tests mirror `tests/test_ingest_validate.py` patterns (FakePool /
+  FakeConn). Cases: happy, malformed path, no session, wrong state,
+  expired, bad secret, non-publish action.
+
+**Verification once api-server endpoint ships:** in the streaming
+server, unset `MOCK_*` overrides, point `UPSTREAM_API_BASE_URL` at the
+real api-server, and rerun `scripts/smoke_authhttp_deny.sh` with a
+known-good `ALLOWED_PATH=<real sess_xxx>` plus the bogus case. Bogus
+case should deny with `max_frames=0`; real case should pass through
+and the existing `runOnReady` hook should fire `stream-started`.
+
+**Follow-up:** when MediaMTX is bumped to 1.11+, migrate the secret
+out of the URL path segment and into an `authHTTPHeaders` entry so
+secrets stop appearing in URL access logs.
 
 ---
 
