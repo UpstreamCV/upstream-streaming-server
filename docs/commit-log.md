@@ -4,6 +4,47 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-14 — Advertise public ICE candidate via webrtcAdditionalHosts
+
+**Type:** config fix. **Symptom:** dashboard WHEP signaling succeeded
+(SDP 201 from MediaMTX) but the browser hung in "connecting…" forever
+and eventually retried.
+
+**Root cause:** MediaMTX's SDP answer only listed one ICE candidate —
+the docker bridge IP, e.g. `a=candidate:... 172.21.0.2 18189 typ host`.
+A browser outside the streaming server's docker network cannot reach
+`172.21.0.2`, so ICE never completes. Without `webrtcAdditionalHosts`
+(and with no STUN server configured), MediaMTX has no way to know its
+own externally-reachable hostname/IP.
+
+**Fix:** `mediamtx.yml` now sets
+`webrtcAdditionalHosts: [ingest.upstreamcv.com]` so MediaMTX emits a
+second host-type ICE candidate with the public hostname. UDP/18189 must
+still be reachable to that hostname externally (the streaming server's
+router needs to port-forward UDP 18189 to the host's docker port; the
+container internally listens on 18189 per the host-only port-remap
+commit on the crowdcounts2 deploy).
+
+**Why not STUN/TURN:** for a known fixed-IP deploy, listing the public
+hostname is simpler than running a STUN server. A future move to a
+cloud deploy with rotating IPs should switch to a STUN-only setup via
+`webrtcICEServers2`.
+
+**Verification:**
+```sh
+# From the streaming-server box, against a real session:
+curl -sS -X POST -H 'Content-Type: application/sdp' \
+  --data-binary @scripts/fixtures/canned-whep-offer.sdp \
+  http://localhost:<WHEP_PORT>/<path>/whep | grep candidate
+# expect: two candidates per media line — one host-internal docker IP
+# AND one with ingest.upstreamcv.com
+```
+
+**Deploy:** `git pull --ff-only && docker compose restart mediamtx`
+(no rebuild needed — config-only change).
+
+---
+
 ## 2026-05-13 — Milestone 4 (lifecycle webhooks): runOnReady / runOnNotReady ship
 
 **Type:** feature commit. Adds the long-deferred MediaMTX → `upstream-api-server`

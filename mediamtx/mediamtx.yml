@@ -66,6 +66,18 @@ webrtc: yes
 webrtcAddress: :8889
 webrtcLocalUDPAddress: :8189
 
+# Advertise an additional ICE candidate so browsers can reach this
+# server from outside its docker network. Without this, MediaMTX only
+# advertises the container's docker-bridge IP (e.g. 172.21.0.2) which
+# is unreachable from any external host — every WebRTC connection
+# attempt hangs in "checking" forever even though signaling succeeds.
+#
+# Set this to the public hostname or IP that ICE candidates should
+# resolve to. Defaults are tuned for the production ingest server; for
+# local dev override via `webrtcAdditionalHosts: [127.0.0.1]` in a
+# checked-out copy of this file or use `--config` on the mediamtx CLI.
+webrtcAdditionalHosts: [ingest.upstreamcv.com]
+
 # HLS intentionally disabled in M1 to keep the surface small. Flip to `yes`
 # and expose port 8888 in docker-compose.yml if you want browser playback
 # without WebRTC. Future milestones may turn this on for the dashboard.
