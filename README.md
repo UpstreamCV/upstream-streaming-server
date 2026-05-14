@@ -39,8 +39,8 @@ streaming server host. See `docs/architecture.md` for the long-form picture.
 
 ## Milestone scope
 
-**Implemented:** M1 (local MediaMTX SRT ingest) and M2 (API SRT URL
-compatibility).
+**Implemented:** M1 (local MediaMTX SRT ingest), M2 (API SRT URL
+compatibility), and M3 (agent live smoke).
 
 - **M1** — MediaMTX runs locally via Docker Compose. SRT publishes are
   accepted on UDP/8890. Published streams are readable via RTSP and (basic)
@@ -49,14 +49,20 @@ compatibility).
   produced by `upstream-api-server` and publishes a test pattern to it
   unchanged. The URL is treated as opaque (it contains the session JWT);
   the script never echoes it. See "Milestone 2" below for the flow.
+- **M3** — The real `upstream-agent` (`upstream run`) opens a real
+  camera, fetches a real API-issued SRT URL from `upstream-api-server`,
+  and publishes H264/MPEG-TS into MediaMTX end-to-end. Verified via
+  MediaMTX's HTTP API (ready path, `tracks: ["H264"]`, `bytesReceived`
+  increasing) and via RTSP/ffprobe (`codec_name=h264`, 1280x720,
+  `yuv420p`). See "Milestone 3" below.
 
 The following are **explicitly NOT implemented yet** (each has its own design
 doc marking the boundary):
 
-- Stream/session token validation → `docs/stream-auth.md`
-- Media format validation (ffprobe) → `docs/stream-validation.md`
+- Stream/session token validation → `docs/stream-auth.md` (M4)
+- Media format validation (ffprobe) → `docs/stream-validation.md` (M5)
 - Fanout to snapshotter / processor / recording → `docs/routing.md`
-- Webhook callbacks to `upstream-api-server`
+- Webhook callbacks to `upstream-api-server` (M4)
 - Production deployment / Kubernetes / multi-region
 - Dashboard wiring
 
@@ -126,13 +132,15 @@ M2 proves that an SRT URL issued by `upstream-api-server`'s
 compatibility. Auth lands in M4 (see `docs/stream-auth.md`); validation
 in M5 (see `docs/stream-validation.md`).
 
-### Required API-side prerequisite
+### Required API-side prerequisite (resolved during M3)
 
-The API today hardcodes the ingest host as `ingest.upstream.tv:8890`
-(`upstream-api-server/src/upstream_api/services/session_lifecycle.py`,
-`_build_srt_url`). For local M2 testing, the API must be runnable with an
-env override so the returned `srt_url` points at `localhost:8890`. The
-exact change required is tracked in `docs/follow-ups.md` (FU-1).
+Historically the API hardcoded the ingest host as `ingest.upstream.tv:8890`
+and put the full session JWT into the SRT `streamid`. Both have since
+been fixed in `upstream-api-server`: the API now returns a reachable
+ingest host/port and a short stream key (e.g. `sess_<short-id>`). See
+`docs/follow-ups.md` FU-1 (resolved) for the history. No special env
+override is needed on this server's side — the API-issued URL works
+unchanged.
 
 ### Flow
 
@@ -164,6 +172,66 @@ exact change required is tracked in `docs/follow-ups.md` (FU-1).
 - FFmpeg's own error output may print the SRT URL on a connection
   failure — that is a tool-level constraint. Scrub any logs you share.
   See `docs/troubleshooting.md` for what to do if a URL leaks.
+
+## Milestone 3
+
+M3 proves that the **real** `upstream-agent` can stream a **real** camera
+into this MediaMTX server using the **real** SRT URL issued by
+`upstream-api-server`. **M3 does not implement auth or media validation**
+— that work lands in M4 (auth + lifecycle webhooks, see
+`docs/stream-auth.md`) and M5 (ffprobe enforcement, see
+`docs/stream-validation.md`). MediaMTX still accepts the permissive
+catch-all path until M4.
+
+### Verified flow
+
+```
+upstream-agent  →  upstream-api-server  →  API-issued SRT URL  →  FFmpeg/SRT  →  MediaMTX  →  RTSP/ffprobe
+```
+
+- `upstream run` opened the camera on the agent machine.
+- The agent registered/loaded its agent + camera through
+  `upstream-api-server`.
+- The API returned a reachable SRT URL with a **short** stream key
+  (e.g. `sess_<short-id>`) — not a full JWT in `streamid`, and not
+  pointing at the old `ingest.upstream.tv` host.
+- FFmpeg (launched by the agent) streamed H264/MPEG-TS over SRT to
+  MediaMTX.
+- MediaMTX's HTTP API reported the path as `ready: true`,
+  `source.type: srtConn`, `tracks: ["H264"]`, with `bytesReceived`
+  increasing.
+- RTSP read-back via ffprobe reported `codec_name=h264`,
+  width `1280`, height `720`, `pix_fmt=yuv420p`.
+- Tested with the **real API-issued URL** (no
+  `UPSTREAM_DEV_SRT_URL_OVERRIDE` used on the agent).
+
+### Blockers resolved upstream
+
+The live API leg of M2 was previously blocked by two API-side issues.
+M3 confirms both have been fixed in `upstream-api-server`:
+
+- The API used to hardcode `ingest.upstream.tv` as the ingest host.
+  It now returns a reachable host/port.
+- The API used to put the full session JWT into the SRT `streamid`,
+  which exceeded SRT's streamid length limit. It now returns a short
+  stream key (e.g. `sess_<short-id>`) and persists the JWT ↔ stream-key
+  mapping server-side.
+
+Practical consequence on this side: MediaMTX path names are now short
+and inspectable directly, so `STREAM_NAME=sess_<short-id>` works in
+`scripts/inspect_stream.sh`.
+
+### Security rules (still apply in M3)
+
+- **Never commit, paste, or echo a real SRT URL.** It is a short-lived
+  bearer credential.
+- This README and the runbook in `docs/local-dev.md` deliberately use
+  placeholders (`sess_<short-id>`, `<PATH_NAME>`) — never real session
+  values.
+
+### Runbook
+
+See `docs/local-dev.md` ("M3 agent live smoke") for the exact commands.
 
 ## Repo layout
 

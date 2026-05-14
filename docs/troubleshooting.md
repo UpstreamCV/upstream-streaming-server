@@ -147,6 +147,76 @@ connection failure. The script never echoes the URL, but ffmpeg does.
 If you are sharing a publish log because something failed, scrub the
 `streamid=publish:...` and `latency=...` substrings first.
 
+## Milestone 3: agent live smoke issues
+
+These all assume the real `upstream-agent` (`upstream run`) is the
+publisher and a real `upstream-api-server` is minting the SRT URL.
+
+### `upstream run` fails with `Failed to resolve hostname ingest.upstream.tv`
+
+Meaning: the deployed API is still returning the old hardcoded ingest
+host. The agent passes the URL to FFmpeg byte-for-byte, so FFmpeg tries
+to resolve `ingest.upstream.tv` and fails.
+
+Fix: the deployed `upstream-api-server` must return a reachable ingest
+host/port (the env-driven override that was tracked as FU-1, resolved
+during M3). Confirm the response from `POST /v1/stream-sessions/start`
+contains a host you can `dig` or `ping` from the agent machine.
+
+### `streamid value is too long`
+
+Meaning: the API put a full session JWT into the SRT `streamid`
+parameter. SRT's `streamid` is capped well below typical JWT lengths,
+so FFmpeg refuses to publish.
+
+Fix: the API must return a **short** stream key (e.g.
+`sess_<short-id>`) and persist the JWT ↔ stream-key mapping
+server-side. Resolved upstream during M3 — re-pull the API server if
+you still see this.
+
+### MediaMTX HTTP API shows a ready path but `inspect_stream.sh` returns 404
+
+Meaning: you are almost certainly inspecting the wrong RTSP host port.
+The container default is `8554`, but the **current server deployment**
+maps RTSP to host port `18554`.
+
+Fix:
+
+```bash
+docker compose ps                                  # confirm host ports
+RTSP_PORT=18554 STREAM_NAME=<path> \
+  ./scripts/inspect_stream.sh
+```
+
+Also confirm `STREAM_NAME` is the exact path name shown in
+`curl -s http://<host>:<api-port>/v3/paths/list`.
+
+### Public SRT publish fails but a same-LAN publish to the server works
+
+Meaning: router / firewall / UDP port forwarding. SRT is UDP, and the
+current server deployment listens on host UDP `18890`. NAT routers do
+not forward UDP by default.
+
+Fix: forward UDP `18890` from the public IP to the server's LAN IP,
+then confirm packets are arriving on the server with:
+
+```bash
+sudo tcpdump -ni any udp port 18890
+```
+
+Run that on the server while the agent is publishing from a different
+network. If you see no packets, the forward isn't in place (or the
+ISP is blocking inbound UDP).
+
+### FFmpeg / Camo / camera device not visible on macOS
+
+This is an **agent-side** camera availability issue, not a
+streaming-server problem. The streaming server cannot see the camera —
+it only sees whatever bytes FFmpeg sends it. Diagnose in the
+`upstream-agent` repo: check macOS Privacy & Security → Camera
+permissions, ensure Camo (or whichever virtual camera) is running, and
+verify the device appears in `ffmpeg -f avfoundation -list_devices true -i ""`.
+
 ## How to see everything at once
 
 ```bash

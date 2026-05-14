@@ -145,3 +145,103 @@ webhook callbacks in this milestone.
   publish; confirm inspect against the long path name returns
   h264/1280x720/30 fps.
 - **Real-API-issued URL test: BLOCKED** on FU-1.
+  (Resolved during M3 — see the M3 entry below.)
+
+---
+
+## Milestone 3 — Agent live smoke verified
+
+**Date:** 2026-05-13
+**Scope:** Verify the full real-world live path end-to-end. The real
+`upstream-agent` (`upstream run`) opens a real camera, fetches a real
+SRT URL from `upstream-api-server`, and publishes into this MediaMTX,
+which routes the stream to RTSP/ffprobe. **No new feature code** in
+this repo — M3 is a closeout / documentation / runbook milestone.
+Ingest auth, validate-stream, lifecycle webhooks, ffprobe enforcement,
+snapshotter, processor handoff, dashboard, recording, and k8s remain
+deferred to M4+.
+
+### Added
+
+- `README.md` — new "Milestone 3" section: verified flow, blockers
+  resolved upstream, security rules reaffirmed, pointer to the
+  runbook. Milestone-scope block updated to mark **M1, M2, M3** all
+  implemented.
+- `docs/local-dev.md` — new "Milestone 3: agent live smoke" runbook:
+  server start, agent start (`upstream run` in the sibling repo),
+  MediaMTX HTTP API verification, ffprobe verification using the
+  short stream key path name, and a local-dev vs. server-deployment
+  port-mapping table (SRT 8890/18890, RTSP 8554/18554, HTTP API
+  9997/19997).
+- `docs/troubleshooting.md` — new "Milestone 3: agent live smoke
+  issues" section with five entries: `ingest.upstream.tv` hostname
+  resolution failure (historical), `streamid value is too long`
+  (historical), MediaMTX HTTP API shows ready path but RTSP returns
+  404 (wrong host port), public SRT publish fails behind NAT
+  (UDP/18890 port-forwarding), and a note that camera-device issues on
+  macOS are agent-side, not server-side.
+- `docs/architecture.md` — new "Milestone 3 flow" ASCII diagram (real
+  agent → real API → SRT → MediaMTX → RTSP/ffprobe), prose clarifying
+  M3 proves live routing only and not production auth.
+
+### Changed
+
+- `docs/architecture.md` — milestone roadmap table updated:
+  - **M3 ✓** Agent live smoke
+  - **M4** Ingest auth + lifecycle webhooks (was "M3 container hardening";
+    container hardening is folded into the production-deploy track at
+    M8+)
+  - M5+ unchanged.
+- `docs/architecture.md` — M2 section heading updated from
+  "gated on API env override" to "API env override resolved during M3".
+- `docs/module-map.md` — `inspect_stream.sh` row now documents the
+  `RTSP_HOST` / `RTSP_PORT` / `STREAM_NAME` env vars and the
+  `RTSP_PORT=18554` invocation for the server deployment. `README.md`
+  row updated to reference M1/M2/M3.
+- `docs/follow-ups.md` — **FU-1** marked **resolved**: the deployed API
+  now returns a reachable ingest host/port and a short stream key
+  (`sess_<short-id>`) instead of stuffing a full JWT into SRT
+  `streamid`. The streaming-server-side live half of M2 (and all of M3)
+  is unblocked. A new **FU-2** captures the M4 validate-stream
+  response-widening still required from the API.
+
+### Not changed / not in this milestone
+
+- `scripts/inspect_stream.sh` already supported `RTSP_HOST`,
+  `RTSP_PORT`, and `STREAM_NAME` env vars (added in M1). No script
+  changes were required — only documentation.
+- `docker-compose.yml`, `mediamtx/mediamtx.yml` — unchanged.
+- Still **no** ingest auth hook, **no** validate-stream API call, **no**
+  stream-started/stream-ended webhook callbacks, **no** ffprobe
+  enforcement, **no** snapshotter, **no** processor handoff, **no**
+  dashboard wiring, **no** recording / HLS production tuning, **no**
+  Kubernetes / production deploy.
+
+### Verification (what was actually observed)
+
+- Real `upstream run` on the agent machine was used (not a script
+  smoke).
+- `UPSTREAM_DEV_SRT_URL_OVERRIDE` was **not** used — the SRT URL came
+  from the deployed `upstream-api-server`.
+- MediaMTX HTTP API showed:
+  - path `sess_2a88f3405d513c05`
+  - `source.type: srtConn`
+  - `ready: true`
+  - `tracks: ["H264"]`
+  - `bytesReceived` increasing over time
+- RTSP/ffprobe (over TCP) reported:
+  - `codec_name=h264`
+  - `width=1280`
+  - `height=720`
+  - `pix_fmt=yuv420p`
+- `bash -n scripts/*.sh` and `docker compose config` — see PR
+  description.
+
+### Next milestone
+
+**M4 — ingest auth and session validation.** The streaming server
+calls `POST /v1/ingest/validate-stream` on `upstream-api-server` to
+verify the session JWT (via the short stream key → JWT mapping the
+API now stores), accepts or rejects the publish based on the response,
+and posts `stream-started` / `stream-ended` / `validation-failed`
+lifecycle webhooks. See `docs/stream-auth.md` for the contract.

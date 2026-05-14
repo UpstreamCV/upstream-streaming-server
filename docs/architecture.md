@@ -71,7 +71,7 @@ scripts/inspect_stream.sh    ◀── ffprobe ─┘
 
 No API server is involved. No JWT is validated. No media checks happen.
 
-## Milestone 2 flow (complete on the streaming-server side; gated on API env override)
+## Milestone 2 flow (complete; API env override resolved during M3)
 
 ```
 developer laptop                          upstream-api-server               upstream-streaming-server
@@ -96,6 +96,43 @@ accepts it bit-for-bit. There is still no auth check, no media check, and
 no webhook callback on this side — those land in M4. The M2 mediamtx.yml
 remains a permissive catch-all.
 
+## Milestone 3 flow (complete)
+
+```
+agent machine                       upstream-api-server               upstream-streaming-server
+─────────────                       ─────────────────────             ───────────────────────────
+upstream run
+  └── open camera (avfoundation/v4l2)
+  └── POST /v1/stream-sessions/start ─▶   mints session JWT
+                                          allocates short stream key
+                                          (e.g. sess_<short-id>)
+                                          builds srt_url ──┐
+                                                            │
+                  returns srt_url (short streamid) ◀────────┘
+  └── exec ffmpeg
+       └── H264/MPEG-TS over SRT ───────────────────────────────────────▶ MediaMTX (UDP/18890 on server)
+                                                                            │
+                                                                            ├── path sess_<short-id>
+                                                                            │     source.type: srtConn
+                                                                            │     ready: true
+                                                                            │     tracks: ["H264"]
+                                                                            │     bytesReceived ↑
+                                                                            │
+operator                                                                    │
+  └── curl http://<server>:19997/v3/paths/list  ◀── HTTP API ───────────────┤
+  └── ffprobe rtsp://<server>:18554/<path>      ◀── RTSP ───────────────────┘
+        codec_name=h264, 1280x720, yuv420p
+
+         (M4: validate-stream + stream-started/stream-ended webhooks still not wired)
+         (M5: ffprobe enforcement against `expected` still not wired)
+```
+
+M3 proves **live routing only**: a real agent + real API + real camera
+publishes into MediaMTX and is readable end-to-end. There is still no
+auth enforcement on this side, no media validation, and no callback to
+the API on stream start/end. MediaMTX still accepts the permissive
+catch-all path until M4.
+
 ## Horizontal scaling note
 
 The streaming server is **horizontally scalable but not unlimited on one
@@ -113,8 +150,8 @@ step; node selection itself is a later milestone.
 |-----------|--------------------------------------------------------------|
 | **M1** ✓  | Local MediaMTX, SRT ingest, RTSP/WebRTC read-back, smoke scripts |
 | **M2** ✓  | API SRT URL pass-through script + redaction; M4/M5 contracts documented |
-| M3        | Container-level production hardening (logging, healthchecks) |
-| M4        | Auth: validate-stream webhook, stream-started/ended/failed callbacks |
+| **M3** ✓  | Agent live smoke: real `upstream run` → API URL → MediaMTX → RTSP/ffprobe |
+| M4        | Ingest auth: validate-stream webhook, stream-started/ended/failed callbacks |
 | M5        | ffprobe-based media validation, enforced against `expected` from M4 |
 | M6        | Latest-frame JPEG snapshotter                                |
 | M7        | Processor handoff                                            |

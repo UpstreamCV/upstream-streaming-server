@@ -94,24 +94,17 @@ M2 proves that an SRT URL from `upstream-api-server` works **unchanged**
 with this server. There is still no auth enforcement on this side — that
 arrives in M4 — so M2 is strictly URL compatibility.
 
-### Prerequisite (API side)
+### Prerequisite (API side) — resolved during M3
 
-`upstream-api-server`'s `_build_srt_url`
-(`src/upstream_api/services/session_lifecycle.py`) hardcodes the ingest
-host as `ingest.upstream.tv:8890`. For local M2 testing it must accept an
-env override. Suggested names:
+Historically `upstream-api-server` hardcoded the ingest host as
+`ingest.upstream.tv:8890` and put the full session JWT into the SRT
+`streamid`. Both issues are now fixed in the deployed API: the
+returned `srt_url` points at a reachable host/port and uses a short
+stream key (e.g. `sess_<short-id>`). See `docs/follow-ups.md` FU-1
+(resolved) for history. No special env override is required on this
+server's side — the API-issued URL works unchanged.
 
-- `UPSTREAM_SRT_INGEST_HOST=localhost`
-- `UPSTREAM_SRT_INGEST_PORT=8890`
-
-`UPSTREAM_SRT_LATENCY_MS` is **not** needed — latency is derived per
-session from `latency_mode` (`low`/`balanced`/`stable` → 80/200/1500 ms).
-
-This change is tracked in `docs/follow-ups.md` (FU-1). Until it ships,
-the live API leg of M2 is blocked. The script and pass-through logic on
-this side are already done and tested with a shape-only placeholder URL.
-
-### Local M2 flow (once API override is wired)
+### Local M2 flow
 
 1. **Start MediaMTX**:
    ```bash
@@ -157,6 +150,106 @@ endpoint immediately to invalidate it on the API side. Clear shell
 history (`history -d <N>` or rotate your shell session). Scrub the
 leaked log/message. See `docs/troubleshooting.md` for the full
 checklist.
+
+## Milestone 3: agent live smoke
+
+M3 proves the full real-world live path: the real `upstream-agent`
+(`upstream run`) opens a real camera, fetches a real API-issued SRT
+URL from `upstream-api-server`, and publishes into this MediaMTX. There
+is still no auth or media validation on this side — that arrives in
+M4/M5.
+
+### Server side (this repo)
+
+```bash
+cd ~/Documents/Upstream/upstream-streaming-server
+docker compose up -d
+docker compose logs -f mediamtx
+```
+
+### Agent machine (sibling repo)
+
+```bash
+cd ~/Documents/Upstream/upstream-agent
+source .venv/bin/activate
+upstream run
+```
+
+The agent calls `POST /v1/stream-sessions/start` on
+`upstream-api-server`, receives an SRT URL (short stream key, e.g.
+`sess_<short-id>`), opens the camera, and execs FFmpeg to publish
+H264/MPEG-TS over SRT.
+
+### Server-side verification
+
+Confirm a ready path:
+
+```bash
+curl -s http://localhost:19997/v3/paths/list | python3 -m json.tool
+```
+
+Expected: at least one path with `source.type: "srtConn"`,
+`ready: true`, `tracks: ["H264"]`, and `bytesReceived` increasing over
+time.
+
+Then read back with ffprobe, substituting the path name from the API
+response (e.g. `sess_2a88f3405d513c05`):
+
+```bash
+ffprobe -v error \
+  -rtsp_transport tcp \
+  -select_streams v:0 \
+  -show_entries stream=codec_name,width,height,pix_fmt,r_frame_rate \
+  -of default=nw=1 \
+  -timeout 5000000 \
+  rtsp://localhost:<RTSP_PORT>/<PATH_NAME>
+```
+
+Or, equivalently, via the smoke script:
+
+```bash
+RTSP_PORT=<RTSP_PORT> STREAM_NAME=<PATH_NAME> ./scripts/inspect_stream.sh
+```
+
+Expected: `codec_name=h264`, `width=1280`, `height=720`,
+`pix_fmt=yuv420p`.
+
+### Port differences: local dev vs. server deployment
+
+The same MediaMTX container is used in both, but the host-side port
+mappings differ. Always check `docker compose ps` for the actual host
+ports in your environment.
+
+| Protocol            | Local dev (container default) | Current server deployment (host) |
+|---------------------|--------------------------------|-----------------------------------|
+| SRT ingest (UDP)    | `8890`                         | `18890`                           |
+| RTSP read (TCP)     | `8554`                         | `18554`                           |
+| MediaMTX HTTP API   | `9997`                         | `19997`                           |
+| WebRTC HTTP (TCP)   | `8889`                         | `8889`                            |
+| WebRTC ICE (UDP)    | `8189`                         | `8189`                            |
+
+`scripts/inspect_stream.sh` reads `RTSP_HOST` (default `localhost`),
+`RTSP_PORT` (default `8554`), and `STREAM_NAME` (default `test`). To
+inspect a stream on the current server deployment:
+
+```bash
+RTSP_PORT=18554 STREAM_NAME=sess_<short-id> ./scripts/inspect_stream.sh
+```
+
+If you see `404 Not Found` from RTSP but the MediaMTX HTTP API shows a
+ready path, you are almost certainly pointed at the wrong RTSP host
+port — re-check `docker compose ps`.
+
+### Tear down
+
+Agent side: `Ctrl-C` `upstream run` (the agent will call
+`POST /v1/stream-sessions/{id}/stop` on shutdown).
+
+Server side:
+
+```bash
+docker compose down
+```
 
 ## Common local-dev notes
 
