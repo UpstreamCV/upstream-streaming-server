@@ -89,6 +89,16 @@ reach this server via SSH tunnel or a private network.
 For Kubernetes deploys: use a `ClusterIP` service for the read ports
 and a `NodePort` / `LoadBalancer` only for `8189/udp`.
 
+For docker-on-bare-Linux deploys behind a home-network NAT (the
+current ingest server, `crowdcounts2`): use
+`scripts/firewall-restrict-readports.sh`. It installs idempotent
+`iptables` rules in `DOCKER-USER` that allow only loopback, the LAN,
+tailscale, docker bridges, and the AWS api-server's Elastic IP to
+reach the TCP read ports (8889 / 8554 / 9997, container-side). Run
+with `--persist` to install `iptables-persistent` so the rules
+survive reboot; `--remove` reverts. The script's source IPs are
+overridable via env so it's reusable for other deploys.
+
 ### What is intentionally NOT in this repo
 
 Same exclusions as ingest auth: no token signing, no account

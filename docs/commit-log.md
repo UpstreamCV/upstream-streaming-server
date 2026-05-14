@@ -4,6 +4,70 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-14 — Firewall script for read-port lockdown (operational)
+
+**Type:** new operational script; no MediaMTX / docker-compose / config
+behavior changes. The script is applied on each ingest host by an
+operator with `sudo`, not by docker-compose.
+
+**Why:** MediaMTX's TCP read ports (8889 WHEP / 8554 RTSP / 9997 HTTP
+API, host-published as 18889/18554/19997 on the crowdcounts2 deploy)
+are currently reachable from the public internet. Anyone who learns a
+session's `streamid` could POST WHEP directly to MediaMTX and bypass
+the api-server's account-scoped read auth. The `docs/stream-auth.md`
+"Production deploy posture" section has called this out as required
+for a long time; this commit ships the concrete tool to enforce it.
+
+**What it does:** `scripts/firewall-restrict-readports.sh` installs
+idempotent `iptables` rules in the `DOCKER-USER` chain that allow
+loopback, LAN (`10.0.0.0/24`), tailscale (`100.64.0.0/10`), docker
+bridges (`172.16.0.0/12`), and the AWS api-server's Elastic IP
+(`<api-ip>`) to reach those TCP ports; everything else is
+DROPped. `8890/udp` (SRT ingest) and `18189/udp` (WebRTC ICE) stay
+public on purpose. Source CIDRs and the AWS IP are overridable via
+env so the same script is reusable on different deploys.
+
+**Why `DOCKER-USER` not `INPUT`:** docker bypasses INPUT entirely via
+its DNAT chain — rules added to INPUT for these published ports
+silently no-op. `DOCKER-USER` is the documented per-user hook docker
+provides for rules that should run before its own FORWARD entries.
+Match uses the container-side ports (8889/etc.) because packets reach
+DOCKER-USER already DNAT'd.
+
+**Idempotent:** rules are tagged with an `upstream-firewall:` iptables
+comment. Re-running the script first removes every tagged rule, then
+re-applies — safe to run on each deploy, no double-installs.
+
+**Persistence:** invoke with `--persist` to install
+`iptables-persistent` and save rules to `/etc/iptables/`. Without it,
+rules survive container restarts but not host reboots. `--remove`
+reverts everything tagged. `--help` prints the doc block.
+
+**Files added:**
+- `scripts/firewall-restrict-readports.sh` (NEW, executable).
+- `docs/stream-auth.md` — new bullet under "Production deploy
+  posture" pointing at the script for docker-on-bare-Linux deploys.
+
+**Operator runbook (crowdcounts2):**
+```sh
+ssh crowdcounts2@crowdcountS2
+cd Documents/Upstream/upstream-streaming-server
+git pull --ff-only
+sudo bash scripts/firewall-restrict-readports.sh --persist
+# Verify the rules are in place from the script's --verify output, then
+# from AWS try: curl -m 5 http://ingest.upstreamcv.com:18889/  → expect
+# the TCP connection to succeed (HTTP 400 from MediaMTX is fine; we just
+# need it to NOT be refused/timed-out). From a non-allowed public host
+# (e.g. cellular), the same curl should hang and time out.
+```
+
+**Verification:** `bash -n scripts/firewall-restrict-readports.sh`
+clean. Live verification is per-host (see runbook); the script also
+prints a `verification — ...` block after applying with three curl
+recipes covering the three source-IP categories.
+
+---
+
 ## 2026-05-14 — Advertise public ICE candidate via webrtcAdditionalHosts
 
 **Type:** config fix. **Symptom:** dashboard WHEP signaling succeeded
