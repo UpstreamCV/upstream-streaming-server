@@ -12,8 +12,10 @@ services:
   mediamtx:
     # TODO: review this pin before production. Bumping MediaMTX can change
     # config-key names and protocol behavior — re-test smoke scripts after any
-    # version bump.
-    image: bluenviron/mediamtx:1.9.3
+    # version bump. The Dockerfile pins the same version; keep them aligned.
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: upstream-mediamtx
     restart: unless-stopped
     # Run as root inside the container; MediaMTX does not need extra caps for
@@ -21,7 +23,8 @@ services:
     ports:
       # SRT ingest (UDP). Agents publish to this port.
       - "18890:8890/udp"
-      # RTSP read endpoint (TCP). Used by ffplay/ffprobe in the smoke scripts.
+      # RTSP read endpoint (TCP). Used by ffplay/ffprobe in the smoke scripts
+      # AND by the M4 `runOnReady` hook to ffprobe the local re-stream.
       - "8554:8554/tcp"
       # WebRTC signaling/WHEP (HTTP). Browser-friendly read path.
       - "8889:8889/tcp"
@@ -33,3 +36,12 @@ services:
       - "9997:9997/tcp"
     volumes:
       - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
+      # M4 hook scripts mounted read-only. MediaMTX execs `/hooks/on_ready.sh`
+      # and `/hooks/on_not_ready.sh` per the `runOnReady` / `runOnNotReady`
+      # entries in mediamtx.yml.
+      - ./scripts/hooks:/hooks:ro
+    environment:
+      # M4 webhook auth + target. Read from the host shell or `.env`.
+      # Both must be set; hooks fail-loud (exit non-zero) if missing.
+      UPSTREAM_API_BASE_URL: ${UPSTREAM_API_BASE_URL}
+      UPSTREAM_MEDIAMTX_WEBHOOK_SECRET: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}

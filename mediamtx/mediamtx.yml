@@ -1,9 +1,13 @@
-# MediaMTX configuration — Milestone 1 (local dev).
+# MediaMTX configuration.
 #
-# Scope: accept SRT publishes locally, expose RTSP + WebRTC reads, and surface
-# a local HTTP API for inspection. No auth, no media validation, no API
-# integration. Future milestones will wire runOnReady / runOnDemand / webhook
-# hooks here — search for `TODO (M4)` for the exact insertion points.
+# M1 scope: accept SRT publishes locally, expose RTSP + WebRTC reads, and
+# surface a local HTTP API for inspection. No auth, no media validation.
+# M4 (shipped): per-path `runOnReady` / `runOnNotReady` hooks call the API's
+# `/v1/ingest/lookup-session` to translate `MTX_PATH` -> `session_id`, then
+# POST `stream-started` / `stream-ended` so the dashboard can transition the
+# stream into the playable `streaming` state.
+# Auth on ingest (validate-stream as a runOnConnect deny gate) and ffprobe
+# enforcement (M5) remain deferred — see docs/follow-ups.md.
 
 ###############################################################################
 # Logging
@@ -79,20 +83,25 @@ srtAddress: :8890
 ###############################################################################
 
 # Catch-all path: any publisher with streamid `publish:<name>` creates a
-# matching path on the fly. For M1 we accept any name so the local smoke
-# scripts can publish to `publish:test` without per-path config.
+# matching path on the fly. For dev smoke scripts the name is `test`; for
+# real API-issued sessions the name is the short opaque key `sess_<hex>`.
+# This is intentionally permissive on the auth side — see docs/stream-auth.md
+# for the production firewall posture and the deferred runOnConnect deny gate.
 #
-# TODO (M4): replace this catch-all with auth-gated path config. Options:
-#   1. runOnConnect / runOnReady to call upstream-api-server
-#      `POST /v1/ingest/validate-stream` with the session JWT extracted
-#      from streamid, then accept/reject. See docs/stream-auth.md.
-#   2. Explicit per-session path entries created via the HTTP API after a
-#      successful validate call.
-#
-# Until then, this is intentionally permissive — local only.
+# `runOnReady` fires when MediaMTX has finished SRT handshake + at least one
+# track is decodable. The hook ffprobes the local re-stream, looks up the
+# session_id from the streamid, and POSTs `/v1/ingest/stream-started` so the
+# session moves `approved` -> `streaming` and the dashboard's WHEP proxy
+# unblocks (it returns 409 `session_not_streaming` otherwise).
+# `runOnNotReady` fires when the stream stops; it POSTs `/v1/ingest/stream-ended`
+# so the API records duration for usage billing and `cameras.status` returns
+# to `'idle'`.
+# `runOnReadyRestart: no` ensures we do NOT re-run the hook every time the
+# stream goes ready; we want exactly one stream-started per ingest cycle.
 paths:
   all_others:
     source: publisher
-    # TODO (M4): add `runOnReady:` shell hook to POST stream-started to the
-    # API and `runOnNotReady:` to POST stream-ended. See docs/routing.md.
+    runOnReady: /hooks/on_ready.sh
+    runOnReadyRestart: no
+    runOnNotReady: /hooks/on_not_ready.sh
     # TODO (M6): add `runOnReady:` snapshotter for latest-frame JPEG.

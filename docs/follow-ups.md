@@ -82,7 +82,12 @@ current diagnostics.
 
 ## FU-2 — `upstream-api-server` `validate-stream` response widening
 
-**Status:** open. **Blocks:** Milestone 4 ingest auth on this repo.
+**Status:** open (still relevant for the deferred runOnConnect deny gate;
+not blocking current functionality). **Was blocking** the original M4
+plan to use `validate-stream` as the deny gate at SRT connect time. M4
+shipped lifecycle webhooks via a separate `lookup-session` endpoint
+(see `docs/commit-log.md` 2026-05-13 M4 entry); the deny-gate work
+remains deferred and will need this widening when picked up.
 
 **Where:** `upstream-api-server` — `POST /v1/ingest/validate-stream`
 endpoint and its response model.
@@ -106,6 +111,62 @@ present.
 caller receives an `allowed=true` response with the four IDs and an
 `expected` block; rejection cases return `allowed=false` plus a
 `reason_code` the streaming server can log without secrets.
+
+---
+
+## FU-4 — runOnConnect deny gate for SRT publishers
+
+**Status:** open. **Does not block** current functionality (M4
+lifecycle webhooks ship without it; `cameras.status` and the dashboard
+playback work fine), but **does** leave ingest open to anyone who
+guesses or scrapes a streamid (`sess_<16 hex>` — short enough that
+you wouldn't want it as your only protection).
+
+**Where:** `upstream-streaming-server/mediamtx/mediamtx.yml` —
+catch-all `paths.all_others` block. Today: `runOnReady` /
+`runOnNotReady` only. Required: a `runOnConnect` (or `srtConnect`)
+hook that calls `POST /v1/ingest/validate-stream` with the streamid
+and exits non-zero on rejection so MediaMTX drops the SRT connection
+before any media flows.
+
+**Why deferred:** `validate-stream` returns the narrow shape today
+(see FU-2). A runOnConnect gate is fine with the current shape for
+deny/allow, but tying the deny gate to FU-2's widening means we ship
+both as one consistent change rather than rev the gate twice.
+
+**Verification once shipped:** publishing with a fabricated streamid
+(`srt://.../?streamid=publish:bogus_key&latency=200`) fails before
+ffmpeg sends any video; api-server logs show a `validate-stream`
+reject with `reason_code=session_not_found`. Real API-issued
+streamids continue to work.
+
+---
+
+## FU-5 — Hooks orphan on container kill
+
+**Status:** open. **Risk:** Low — heartbeats and session expiry both
+back-stop, but the cameras list view will incorrectly show "Streaming"
+for up to the session TTL when the streaming-server dies mid-stream.
+
+**Where:** `upstream-streaming-server/scripts/hooks/on_not_ready.sh`
+(and the broader hook lifecycle).
+
+**Problem:** `runOnNotReady` is best-effort — `docker compose down`,
+SIGKILL, or a host crash all skip it. Sessions stay in `streaming`
+state until the agent's session TTL elapses (4h default). A janitor
+on the api-server side that flips stale `streaming` sessions to `ended`
+based on heartbeat absence would close this.
+
+**Where to put it:** new periodic task in `upstream-api-server`
+(can piggy-back on the existing heartbeat infrastructure — agents
+report `status=streaming` while live, so absence-of-heartbeat for
+N minutes is the trigger).
+
+**Verification once shipped:** stop the streaming-server container
+mid-stream without graceful shutdown; within N minutes the affected
+session row flips to `ended` (with an explicit reason code like
+`reason=streaming_server_lost_heartbeat`) and `cameras.status` returns
+to `idle`.
 
 ---
 

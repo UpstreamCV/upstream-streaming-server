@@ -40,7 +40,7 @@ streaming server host. See `docs/architecture.md` for the long-form picture.
 ## Milestone scope
 
 **Implemented:** M1 (local MediaMTX SRT ingest), M2 (API SRT URL
-compatibility), and M3 (agent live smoke).
+compatibility), M3 (agent live smoke), and M4 (lifecycle webhooks).
 
 - **M1** — MediaMTX runs locally via Docker Compose. SRT publishes are
   accepted on UDP/8890. Published streams are readable via RTSP and (basic)
@@ -55,14 +55,26 @@ compatibility), and M3 (agent live smoke).
   MediaMTX's HTTP API (ready path, `tracks: ["H264"]`, `bytesReceived`
   increasing) and via RTSP/ffprobe (`codec_name=h264`, 1280x720,
   `yuv420p`). See "Milestone 3" below.
+- **M4** — `runOnReady` / `runOnNotReady` hooks in `mediamtx/mediamtx.yml`
+  call the api-server's `/v1/ingest/lookup-session`, `stream-started`, and
+  `stream-ended` webhooks via `scripts/hooks/on_ready.sh` and
+  `on_not_ready.sh`. Sessions transition `approved → streaming → ended`
+  and the dashboard's WHEP proxy unblocks (was returning 409
+  `session_not_streaming` until this milestone). Custom `Dockerfile` adds
+  `curl` + `jq` + `bash` on top of `bluenviron/mediamtx:1.9.3-ffmpeg-alpine`
+  so the hook scripts can actually run (the official `:1.9.3` image is
+  `FROM scratch` and would silently no-op them). Set
+  `UPSTREAM_API_BASE_URL` and `UPSTREAM_MEDIAMTX_WEBHOOK_SECRET` in `.env`
+  before `docker compose up --build`.
 
 The following are **explicitly NOT implemented yet** (each has its own design
 doc marking the boundary):
 
-- Stream/session token validation → `docs/stream-auth.md` (M4)
-- Media format validation (ffprobe) → `docs/stream-validation.md` (M5)
+- runOnConnect deny gate via `validate-stream` → `docs/stream-auth.md`
+  (FU-4 in `docs/follow-ups.md`; ingest is currently open to anyone who
+  guesses a streamid)
+- Media format validation (ffprobe enforcement) → `docs/stream-validation.md` (M5)
 - Fanout to snapshotter / processor / recording → `docs/routing.md`
-- Webhook callbacks to `upstream-api-server` (M4)
 - Production deployment / Kubernetes / multi-region
 - Dashboard wiring
 

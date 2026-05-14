@@ -1,8 +1,13 @@
 # Routing / fanout
 
-> **Status: NOT IMPLEMENTED IN MILESTONES 1 OR 2.**
-> M1 and M2 only re-publish the SRT input over RTSP and WebRTC (MediaMTX
-> defaults). The full fanout model below arrives in M6–M8.
+> **Status (2026-05-13):**
+> - M1/M2/M3: SRT publish → RTSP/WebRTC re-publish (MediaMTX defaults).
+> - M4 (shipped): per-path `runOnReady` / `runOnNotReady` hooks notify the
+>   api-server of stream lifecycle so sessions transition `approved →
+>   streaming → ended` and the dashboard's WHEP proxy unblocks. See
+>   `docs/commit-log.md` 2026-05-13 M4 entry and `scripts/hooks/`.
+> - M5+: ffprobe enforcement, snapshotter, processor handoff, recording —
+>   all still deferred per the roadmap below.
 
 ## Future fanout
 

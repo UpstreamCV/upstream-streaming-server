@@ -1,16 +1,29 @@
 # Stream authentication
 
-> **Status: INGEST auth is NOT IMPLEMENTED IN MILESTONES 1 OR 2.**
-> M1 set up the local MediaMTX. M2 proved that an API-issued SRT URL
-> works unchanged but did NOT validate it. Ingest auth lands in M4.
-> This document is the contract M4 will implement against.
+> **Status (2026-05-13):**
 >
-> **READ-PATH auth has shipped (2026-05-13)** via the api-server WHEP
-> proxy — the dashboard's browser playback now flows through the
-> api-server, which enforces account-scoped read auth. See the
-> "Read-path auth (resolved)" section below. MediaMTX itself remains
-> permissive on the read path; production deploys close the gap with
-> a firewall.
+> - **INGEST lifecycle webhooks have SHIPPED** in M4: `runOnReady` /
+>   `runOnNotReady` hooks in `mediamtx/mediamtx.yml` POST to the api-server's
+>   `/v1/ingest/lookup-session`, `/v1/ingest/stream-started`, and
+>   `/v1/ingest/stream-ended`. Sessions transition `approved → streaming →
+>   ended` and `cameras.status` mirrors the lifecycle. See
+>   `docs/commit-log.md` 2026-05-13 M4 entry.
+> - **INGEST auth (deny gate) is NOT YET IMPLEMENTED.** The catch-all path
+>   still accepts any streamid; we have not wired `runOnConnect` →
+>   `validate-stream` as a deny gate. Tracked as **FU-4** in
+>   `docs/follow-ups.md`. Mitigation today: stream keys are 16 hex chars,
+>   minted by the API only after agent auth, and SRT ingest is the only
+>   public surface — but anyone who learns a streamid can publish to that
+>   path until FU-4 lands.
+> - **READ-PATH auth has shipped (2026-05-13)** via the api-server WHEP
+>   proxy — the dashboard's browser playback now flows through the
+>   api-server, which enforces account-scoped read auth. See the
+>   "Read-path auth (resolved)" section below. MediaMTX itself remains
+>   permissive on the read path; production deploys close the gap with
+>   a firewall.
+>
+> The "Future model (M4)" section below is retained as the canonical
+> contract for the deny-gate work (FU-4) when it ships.
 
 ## Read-path auth (resolved)
 

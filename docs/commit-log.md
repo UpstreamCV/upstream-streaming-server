@@ -4,6 +4,105 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-13 — Milestone 4 (lifecycle webhooks): runOnReady / runOnNotReady ship
+
+**Type:** feature commit. Adds the long-deferred MediaMTX → `upstream-api-server`
+ingest lifecycle webhooks.
+
+**What this fixes:** prior to this commit, MediaMTX accepted SRT publishes
+and republished them, but never told the api-server. So `stream_sessions.state`
+stayed `approved` forever, the api-server's WHEP proxy returned
+`409 session_not_streaming`, and the dashboard hung on "Waiting for stream".
+The cameras list view also showed every camera as "Idle" because nothing
+synced `cameras.status` from `stream_sessions.state` — that gap was closed
+on the api-server side in a paired commit (`upstream-api-server`
+`docs/commit-log.md` 2026-05-13 "Sync cameras.status with stream lifecycle").
+
+**Architecture:**
+1. Agent SRT-publishes with `streamid=publish:sess_<hex>`.
+2. MediaMTX accepts (still permissive — runOnConnect deny gate is FU-4) and
+   re-streams over RTSP/WebRTC.
+3. **`runOnReady` (NEW)** fires when at least one track is decodable.
+   `scripts/hooks/on_ready.sh` (NEW) reads `MTX_PATH`, calls
+   `POST /v1/ingest/lookup-session` to translate the streamid to a
+   `session_id`, ffprobes `rtsp://127.0.0.1:8554/$MTX_PATH` (3-retry, 500ms
+   backoff to dodge the empty-streams race), then POSTs
+   `/v1/ingest/stream-started` with the observed codec/resolution/fps/bitrate.
+4. **`runOnNotReady` (NEW)** fires when the stream stops.
+   `scripts/hooks/on_not_ready.sh` (NEW) does the same lookup and POSTs
+   `/v1/ingest/stream-ended` (no `duration_seconds` — the api-server derives
+   it from the session row's `started_at`).
+5. The api-server transitions `stream_sessions.state` and mirrors
+   `cameras.status` in the same transaction. Dashboard playback unblocks.
+
+**Why a custom Dockerfile:** the official `bluenviron/mediamtx:1.9.3` image
+is `FROM scratch` — no shell, no curl, no ffprobe — so MediaMTX hooks would
+silently fail to exec a script. The new `Dockerfile` builds from
+`bluenviron/mediamtx:1.9.3-ffmpeg-alpine` and `apk add`s `curl`, `jq`,
+`bash`, and `coreutils`. `docker-compose.yml` switches from `image:` to
+`build: .`.
+
+**What this does NOT do (deferred):**
+- runOnConnect deny gate via `validate-stream` (FU-4 — leaves ingest open
+  to anyone who guesses a streamid).
+- ffprobe enforcement against `expected` limits (M5 — we observe and report
+  but do not reject mismatches yet).
+- Janitor for orphaned `streaming` sessions when the streaming-server dies
+  mid-stream (FU-5 — back-stopped today by session TTL).
+- Full `validate-stream` response widening (FU-2 — only relevant when FU-4
+  is picked up).
+
+**Files added:**
+- `Dockerfile` — alpine-based MediaMTX with curl/jq/bash/coreutils for hooks.
+- `scripts/hooks/on_ready.sh` — lookup → ffprobe → POST stream-started, with
+  3-retry on empty streams, hard 10s timeout, fail-loud on missing env or
+  non-2xx responses.
+- `scripts/hooks/on_not_ready.sh` — lookup → POST stream-ended; idempotent
+  on lookup 404 (already cleaned up); hard 8s timeout.
+
+**Files changed:**
+- `docker-compose.yml` — `build: .` instead of `image:`; mount
+  `./scripts/hooks:/hooks:ro`; pass `UPSTREAM_API_BASE_URL` and
+  `UPSTREAM_MEDIAMTX_WEBHOOK_SECRET` from the host env.
+- `mediamtx/mediamtx.yml` — `paths.all_others` now wires `runOnReady` and
+  `runOnNotReady` to the new scripts; `runOnReadyRestart: no` to avoid
+  duplicate stream-started calls; removed `TODO (M4)` markers; left the
+  `TODO (M6)` snapshotter note.
+- `.env.example` — `UPSTREAM_MEDIAMTX_WEBHOOK_SECRET` and
+  `UPSTREAM_API_BASE_URL` are now required and documented (not
+  commented-out future-work).
+- `docs/stream-auth.md` — status banner rewritten: lifecycle webhooks
+  shipped, deny gate still pending (FU-4).
+- `docs/follow-ups.md` — FU-2 status updated (no longer blocking, only
+  relevant for FU-4); new FU-4 (runOnConnect deny gate) and FU-5 (orphan
+  cleanup janitor).
+
+**Verification:**
+- `bash -n scripts/hooks/on_ready.sh scripts/hooks/on_not_ready.sh` — clean.
+- `docker compose config` — should validate (run before deploy).
+- **Live end-to-end (after deploy on `crowdcounts2`):**
+  start the agent, watch `docker compose logs -f mediamtx` for
+  `[on_ready sess_<...>] resolved session_id=<uuid>` followed by
+  `stream-started ok`. Dashboard `/dashboard/cameras/<id>` transitions
+  from "Waiting for stream" to live video within ~5s. Stop the agent;
+  expect `[on_not_ready sess_<...>] stream-ended ok` in logs and the
+  cameras list returning to "Idle".
+
+**Deploy:**
+```sh
+ssh crowdcounts2@crowdcountS2
+cd Documents/Upstream/upstream-streaming-server
+git pull --ff-only
+# Confirm UPSTREAM_MEDIAMTX_WEBHOOK_SECRET in .env matches the api-server's value
+docker compose up --build -d
+docker compose logs -f mediamtx
+```
+
+The api-server side ships in a paired commit; deploy that first or in
+parallel — `lookup-session` is the new endpoint the hooks call.
+
+---
+
 ## 2026-05-13 — Read-path auth via api-server WHEP proxy (cross-repo, resolves FU-3)
 
 **Type:** docs + smoke-script changes in this repo, paired with feature
