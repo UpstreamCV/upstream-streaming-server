@@ -37,10 +37,13 @@ on the api-server side in a paired commit (`upstream-api-server`
 
 **Why a custom Dockerfile:** the official `bluenviron/mediamtx:1.9.3` image
 is `FROM scratch` — no shell, no curl, no ffprobe — so MediaMTX hooks would
-silently fail to exec a script. The new `Dockerfile` builds from
-`bluenviron/mediamtx:1.9.3-ffmpeg-alpine` and `apk add`s `curl`, `jq`,
-`bash`, and `coreutils`. `docker-compose.yml` switches from `image:` to
-`build: .`.
+silently fail to exec a script. The `:1.9.3-ffmpeg` variant adds ffmpeg/
+ffprobe but is also `FROM scratch`, and there is no upstream alpine variant
+on Docker Hub. The `Dockerfile` therefore copies the `mediamtx` binary out
+of `bluenviron/mediamtx:1.9.3` (named build stage) into a fresh
+`alpine:3.20` with `ffmpeg`, `curl`, `jq`, `bash`, `coreutils`, and `tzdata`
+installed via `apk add`. `docker-compose.yml` switches from `image:` to
+`build: .`. Multi-arch is preserved because both base images are multi-arch.
 
 **What this does NOT do (deferred):**
 - runOnConnect deny gate via `validate-stream` (FU-4 — leaves ingest open

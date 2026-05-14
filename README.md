@@ -60,12 +60,14 @@ compatibility), M3 (agent live smoke), and M4 (lifecycle webhooks).
   `stream-ended` webhooks via `scripts/hooks/on_ready.sh` and
   `on_not_ready.sh`. Sessions transition `approved → streaming → ended`
   and the dashboard's WHEP proxy unblocks (was returning 409
-  `session_not_streaming` until this milestone). Custom `Dockerfile` adds
-  `curl` + `jq` + `bash` on top of `bluenviron/mediamtx:1.9.3-ffmpeg-alpine`
-  so the hook scripts can actually run (the official `:1.9.3` image is
-  `FROM scratch` and would silently no-op them). Set
-  `UPSTREAM_API_BASE_URL` and `UPSTREAM_MEDIAMTX_WEBHOOK_SECRET` in `.env`
-  before `docker compose up --build`.
+  `session_not_streaming` until this milestone). Custom `Dockerfile`
+  copies the `mediamtx` binary from `bluenviron/mediamtx:1.9.3` into a
+  fresh `alpine:3.20` with `ffmpeg` + `curl` + `jq` + `bash` installed —
+  the official `:1.9.3` and `:1.9.3-ffmpeg` images are both `FROM scratch`
+  and have no shell, so MediaMTX hooks would silently no-op without our
+  own image. Set `UPSTREAM_API_BASE_URL` and
+  `UPSTREAM_MEDIAMTX_WEBHOOK_SECRET` in `.env` before
+  `docker compose up --build`.
 
 The following are **explicitly NOT implemented yet** (each has its own design
 doc marking the boundary):
