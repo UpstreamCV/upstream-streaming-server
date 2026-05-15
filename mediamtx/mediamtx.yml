@@ -106,27 +106,23 @@ srtAddress: :8890
 ###############################################################################
 # Paths
 ###############################################################################
-
-# Catch-all path: any publisher with streamid `publish:<name>` creates a
-# matching path on the fly. The name is the short opaque key `sess_<hex>`
-# minted by `upstream-api-server` at session start. authHTTP above rejects
-# any path that does not map to an approved, unexpired session row, so the
-# catch-all is safe even though no per-path auth is configured here.
 #
-# `runOnReady` fires when MediaMTX has finished SRT handshake + at least one
-# track is decodable. The hook ffprobes the local re-stream, looks up the
-# session_id from the streamid, and POSTs `/v1/ingest/stream-started` so the
-# session moves `approved` -> `streaming` and the dashboard's WHEP proxy
-# unblocks (it returns 409 `session_not_streaming` otherwise).
-# `runOnNotReady` fires when the stream stops; it POSTs `/v1/ingest/stream-ended`
-# so the API records duration for usage billing and `cameras.status` returns
-# to `'idle'`.
-# `runOnReadyRestart: no` ensures we do NOT re-run the hook every time the
-# stream goes ready; we want exactly one stream-started per ingest cycle.
-paths:
-  all_others:
-    source: publisher
-    runOnReady: /hooks/on_ready.sh
-    runOnReadyRestart: no
-    runOnNotReady: /hooks/on_not_ready.sh
-    # TODO (M6): add `runOnReady:` snapshotter for latest-frame JPEG.
+# Every legitimate path is provisioned dynamically by `upstream-api-server`
+# at `/v1/stream-sessions/start` time via MediaMTX's HTTP API
+# (`POST /v3/config/paths/add/{sess_<hex>}`). Each provisioned path
+# carries its own `srtPublishPassphrase` (Phase 2 / FU-6) AND its own
+# `runOnReady` / `runOnNotReady` lifecycle hooks pointing at
+# `/hooks/on_ready.sh` and `/hooks/on_not_ready.sh`. The api-server
+# DELETEs the path at session end.
+#
+# No catch-all `all_others` entry on purpose. Before Phase 2 this block
+# accepted any streamid with unencrypted SRT and relied solely on the
+# authHTTP gate; now an unknown streamid has no matching path entry and
+# MediaMTX rejects the SRT connection outright. This makes "agent
+# without a current /start" a hard failure (clearer than the prior
+# silent-unencrypted fallback) and forecloses on a streamid-guessing
+# attacker even reaching the SRT handshake.
+#
+# Empty `paths:` is intentional and legal in MediaMTX 1.9 — it just
+# means "every path is dynamic, none are statically defined".
+paths: {}

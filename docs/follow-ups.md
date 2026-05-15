@@ -177,6 +177,49 @@ secrets stop appearing in URL access logs.
 
 ---
 
+## FU-7 — Periodic reconciler for MediaMTX restart recovery
+
+**Status:** open. **Risk:** Low — only affects in-flight sessions
+during a streaming-server restart; new sessions are unaffected and
+the agent's automatic `/start` retry handles new connections.
+
+**Problem:** Phase 2 / FU-6 provisions per-session MediaMTX paths via
+the HTTP API at session start. MediaMTX 1.9.3 keeps these paths in
+memory only — a `docker compose restart mediamtx` (or container
+crash) loses every dynamic path. Active sessions see their next SRT
+publish attempt rejected at handshake (path no longer exists) and
+sit in `streaming` state in the DB until they expire or the agent
+reconnects via `/start`.
+
+**Where to put it:** new periodic task in `upstream-api-server`
+that polls `GET /v3/config/paths/list` against the streaming-server
+every ~60s, computes the set difference against
+`stream_sessions WHERE state IN ('approved', 'streaming')`, and
+re-PATCHes any missing paths with the stored `srt_publish_passphrase`.
+
+**Verification once shipped:** while an agent is streaming, run
+`docker compose restart mediamtx` on the streaming-server. Within
+the reconciler interval, the path is re-provisioned and the agent's
+next SRT reconnect attempt succeeds without a `/start` round-trip.
+
+---
+
+## FU-6 — Per-session SRT passphrase
+
+**Status:** **resolved** (2026-05-15, Phase 2). Each session row gets
+its own AES-256 passphrase, baked into the issued SRT URL as
+`&passphrase=<X>&pbkeylen=32` and pushed to MediaMTX as the
+per-path `srtPublishPassphrase` via the HTTP API. The catch-all
+`all_others` block was removed from `mediamtx.yml`, so any streamid
+that hasn't been provisioned by the api-server is rejected at the
+SRT handshake — encryption is now mandatory, not opt-in. See
+`docs/commit-log.md` 2026-05-15 entries.
+
+The original FU-6 description (the old "shared passphrase" sketch)
+is superseded; per-session was the design that shipped.
+
+---
+
 ## FU-5 — Hooks orphan on container kill
 
 **Status:** open. **Risk:** Low — heartbeats and session expiry both

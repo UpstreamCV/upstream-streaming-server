@@ -4,6 +4,62 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-15 — Remove `all_others` catchall (Phase 2 / FU-6 server-side)
+
+**Pairs with:** `upstream-api-server` `aa5b36f` (POST→PATCH provisioning
+fix) and `d3dff7f` (Phase 2 per-session passphrase).
+
+**What changed:**
+`mediamtx/mediamtx.yml` — replaced
+```yaml
+paths:
+  all_others:
+    source: publisher
+    runOnReady: /hooks/on_ready.sh
+    runOnReadyRestart: no
+    runOnNotReady: /hooks/on_not_ready.sh
+```
+with `paths: {}`. Every legitimate path is now provisioned dynamically
+by the api-server via `POST /v3/config/paths/add/{sess_<hex>}` at
+session start, carrying both the per-session `srtPublishPassphrase`
+(AES-256) and the `/hooks/on_ready.sh` + `/hooks/on_not_ready.sh`
+lifecycle hooks. The api-server DELETEs the path at session end via
+`DELETE /v3/config/paths/delete/{sess_<hex>}`.
+
+**Why:** with the catchall in place, any streamid not matched by an
+explicit path would fall back to `all_others` — which had no
+`srtPublishPassphrase` configured, so the SRT handshake would
+complete WITHOUT encryption (and only the authHTTP gate would then
+reject the publish, post-handshake). Removing the catchall makes:
+1. Encryption truly mandatory — any session with no api-server-provisioned
+   path is rejected at the SRT handshake before the authHTTP callback
+   even fires.
+2. Unknown streamids fail faster — MediaMTX drops the connection
+   immediately on path lookup miss rather than running a futile
+   handshake.
+
+**Live verified end-to-end (smoke):**
+- `POST /v1/stream-sessions/start` → returns SRT URL with
+  `&passphrase=<32-char>&pbkeylen=32`.
+- `GET /v3/config/paths/list` on MediaMTX shows the new `sess_<hex>`
+  path with `srtPublishPassphrase` length 32 and the lifecycle hooks
+  attached.
+- `POST /v1/stream-sessions/{id}/stop` → MediaMTX path is deleted
+  (itemCount drops by 1).
+
+**Restart limitation (FU-7, deferred):** MediaMTX's path config is
+in-memory. On streaming-server restart, in-flight sessions break
+until the agent calls `/start` again (which re-provisions). A periodic
+reconciler on the api-server is the planned mitigation; not in scope
+for this commit.
+
+**Rollout:** `git pull --ff-only && docker compose restart mediamtx`
+on crowdcounts2. Active SRT publishes drop at the restart (same as
+every MediaMTX restart). The agent retries `/start` and the new
+session flows through the new dynamic-path path.
+
+---
+
 ## 2026-05-14 — M4.1: ingest deny gate via MediaMTX authHTTP (streaming-server side)
 
 **Type:** behavior change. SRT publishers are now denied at handshake

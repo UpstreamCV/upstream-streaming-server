@@ -1,33 +1,33 @@
 # Stream authentication
 
-> **Status (2026-05-14):**
+> **Status (2026-05-15):**
 >
-> - **INGEST lifecycle webhooks have SHIPPED** in M4: `runOnReady` /
->   `runOnNotReady` hooks in `mediamtx/mediamtx.yml` POST to the api-server's
->   `/v1/ingest/lookup-session`, `/v1/ingest/stream-started`, and
->   `/v1/ingest/stream-ended`. Sessions transition `approved → streaming →
->   ended` and `cameras.status` mirrors the lifecycle. See
->   `docs/commit-log.md` 2026-05-13 M4 entry.
-> - **INGEST auth (deny gate) — streaming-server side SHIPPED** in M4.1:
->   MediaMTX `authMethod: http` POSTs every SRT publish attempt to
->   `${UPSTREAM_API_BASE_URL}/v1/ingest/mediamtx-auth/{secret}` and drops
->   the connection on non-2xx before any media flows. The api-server
->   endpoint is the remaining piece — see **FU-4** in
->   `docs/follow-ups.md` and the "M4.1 ingest deny gate (canonical)"
->   section below. The original M4 plan was to use `runOnConnect` →
->   `validate-stream`; the M4 hook spike (commit-log) disproved that —
->   MediaMTX 1.9.3 hooks cannot deny SRT publishers.
-> - **READ-PATH auth has shipped (2026-05-13)** via the api-server WHEP
->   proxy — the dashboard's browser playback now flows through the
->   api-server, which enforces account-scoped read auth. See the
->   "Read-path auth (resolved)" section below. MediaMTX itself remains
->   permissive on the read path; production deploys close the gap with
->   a firewall.
+> - **INGEST lifecycle webhooks SHIPPED** in M4 (per-session
+>   `runOnReady` / `runOnNotReady` hooks; `cameras.status` mirroring
+>   lifecycle).
+> - **INGEST AUTH (deny gate) SHIPPED** end-to-end in M4.1: MediaMTX
+>   `authMethod: http` calls api-server's
+>   `/v1/ingest/mediamtx-auth/{secret}`, which gates every SRT publish
+>   against the `stream_sessions` state machine. Drops at handshake
+>   on rejection.
+> - **PER-SESSION SRT ENCRYPTION SHIPPED** in Phase 2 (FU-6): each
+>   session gets its own AES-256 passphrase, stored on the
+>   `stream_sessions` row + baked into the SRT URL as
+>   `&passphrase=<X>&pbkeylen=32`. Api-server provisions the matching
+>   per-path config in MediaMTX via `POST /v3/config/paths/add` at
+>   session start and `DELETE /v3/config/paths/delete` at session end.
+>   The catch-all `paths.all_others` was removed — any streamid that
+>   isn't api-server-provisioned now fails at the SRT handshake (no
+>   silent fallback to unencrypted publish). See
+>   `docs/commit-log.md` 2026-05-15 entries and `FU-6` (resolved).
+> - **READ-PATH auth SHIPPED (2026-05-13)** via the api-server WHEP
+>   proxy. MediaMTX read ports are firewall-locked to the api-server
+>   IP only (`scripts/firewall-restrict-readports.sh`).
 >
 > The "M4.1 ingest deny gate (canonical)" section below is the source of
-> truth for the gate contract. The older "Future model (M4)" and "M4
-> validate-stream contract" sections describe the abandoned hook-based
-> plan and are kept only for historical context.
+> truth for the deny-gate contract. The older "Future model (M4)" and
+> "M4 validate-stream contract" sections describe the abandoned
+> hook-based plan and are kept only for historical context.
 
 ## Read-path auth (resolved)
 
