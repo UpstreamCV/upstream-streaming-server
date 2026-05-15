@@ -4,6 +4,43 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-15 — Tighten firewall LAN_CIDR default to /32
+
+**Type:** small but security-relevant default change in
+`scripts/firewall-restrict-readports.sh`.
+
+**What changed:** `LAN_CIDR` default flipped from `10.0.0.0/24` to
+`10.0.0.16/32`. The original allowed every device on the home LAN
+— phones, printers, IoT, transient guests, anyone on Wi-Fi — to
+reach MediaMTX's read ports directly, bypassing the api-server's
+account-scoped read auth. Loopback was already covered separately,
+so the only legitimate "LAN" consumer is the streaming-server's
+own host IP for local dev / smoke testing.
+
+The env-var pattern is preserved: `LAN_CIDR=10.0.0.0/24 sudo bash
+scripts/firewall-restrict-readports.sh --persist` restores the
+broader CIDR for dev boxes that want it.
+
+`docs/stream-auth.md` updated to call out the `/32` default and
+the override pattern.
+
+**Operator action required (this deploy only):** re-run the script
+to apply the new default — the previous `/24` rule would otherwise
+linger in the live `iptables` ruleset (the script's idempotent
+remove-then-reapply takes care of swapping the rules cleanly):
+
+```sh
+ssh crowdcounts2@crowdcountS2
+cd Documents/Upstream/upstream-streaming-server
+git pull --ff-only
+sudo bash scripts/firewall-restrict-readports.sh --persist
+```
+
+After re-run, `sudo iptables -L DOCKER-USER -n -v | grep "allow LAN"`
+should show `10.0.0.16` and not `10.0.0.0/24`.
+
+---
+
 ## 2026-05-15 — Remove `all_others` catchall (Phase 2 / FU-6 server-side)
 
 **Pairs with:** `upstream-api-server` `aa5b36f` (POST→PATCH provisioning

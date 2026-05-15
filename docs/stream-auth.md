@@ -96,12 +96,16 @@ and a `NodePort` / `LoadBalancer` only for `8189/udp`.
 For docker-on-bare-Linux deploys behind a home-network NAT (the
 current ingest server, `crowdcounts2`): use
 `scripts/firewall-restrict-readports.sh`. It installs idempotent
-`iptables` rules in `DOCKER-USER` that allow only loopback, the LAN,
-tailscale, docker bridges, and the AWS api-server's Elastic IP to
-reach the TCP read ports (8889 / 8554 / 9997, container-side). Run
-with `--persist` to install `iptables-persistent` so the rules
-survive reboot; `--remove` reverts. The script's source IPs are
-overridable via env so it's reusable for other deploys.
+`iptables` rules in `DOCKER-USER` that allow only loopback, the
+streaming-server's own host IP (`LAN_CIDR` defaults to a `/32`, NOT
+the wider home-LAN `/24` — see the script's comment on why), tailscale,
+docker bridges, and the AWS api-server's Elastic IP to reach the TCP
+read ports (8889 / 8554 / 9997, container-side). Run with `--persist`
+to install `iptables-persistent` so the rules survive reboot;
+`--remove` reverts. The script's source IPs are overridable via env
+so it's reusable for other deploys (e.g.
+`LAN_CIDR=10.0.0.0/24 sudo bash ...` for a dev box that wants
+broader LAN access).
 
 ### What is intentionally NOT in this repo
 

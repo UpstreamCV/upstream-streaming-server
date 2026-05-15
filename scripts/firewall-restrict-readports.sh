@@ -51,8 +51,19 @@ set -euo pipefail
 # Source IPs that are allowed to reach the restricted ports. Overridable
 # via env so a different deploy (different cloud, different LAN range)
 # can reuse the same script without forking it.
+#
+# `LAN_CIDR` defaults to the streaming-server's own host IP (`/32`), NOT
+# the wider `/24` subnet. The original `/24` would have allowed every
+# device on the home LAN — including phones, printers, IoT, and any
+# transient guest device — to hit MediaMTX's read ports directly,
+# bypassing the api-server's account-scoped auth. Loopback is already
+# covered separately, so the only legitimate "LAN" consumer is the
+# streaming-server reaching its own published ports during local dev /
+# smoke testing. Other deploys with a different LAN topology can
+# override via env (`LAN_CIDR=10.0.0.0/24 sudo bash ...`) for
+# development.
 AWS_API_SERVER_IP="${AWS_API_SERVER_IP:-<api-ip>}"
-LAN_CIDR="${LAN_CIDR:-10.0.0.0/24}"
+LAN_CIDR="${LAN_CIDR:-10.0.0.16/32}"
 TAILSCALE_CIDR="${TAILSCALE_CIDR:-100.64.0.0/10}"
 DOCKER_CIDR="${DOCKER_CIDR:-172.16.0.0/12}"
 
