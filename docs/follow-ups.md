@@ -82,13 +82,14 @@ current diagnostics.
 
 ## FU-2 — `upstream-api-server` `validate-stream` response widening
 
-**Status:** open (relevant for M5 ffprobe enforcement; M4.1 ingest
-deny-gate uses a separate `mediamtx-auth` endpoint and does not need
-this widening). The original M4 plan was to reuse `validate-stream` as
-the deny gate, but the spike (see `docs/commit-log.md` M4.1 entry)
-proved hooks cannot deny SRT publishers, so the design shifted to
-MediaMTX `authHTTP` calling a new dedicated endpoint. `validate-stream`
-is now an internal helper used only by the M4 lifecycle hooks.
+**Status:** partially resolved (2026-05-15, M5.1). M5.1 added the
+dedicated **`GET /v1/ingest/expected/{session_id}`** endpoint which
+returns the same `expected` block (state-agnostic), so the streaming
+server no longer needs `validate-stream` to widen its response shape
+to power the comparator. The remaining open item from FU-2 — renaming
+`accept` to `allowed` and adding `agent_id`/`camera_id`/`account_id`
+to the `validate-stream` response — is **no longer blocking** any
+milestone but stays open for contract hygiene.
 
 **Where:** `upstream-api-server` — `POST /v1/ingest/validate-stream`
 endpoint and its response model.

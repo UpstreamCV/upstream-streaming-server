@@ -159,7 +159,8 @@ step (resolved); per-node selection itself is a later milestone.
 | **M2** ✓  | API SRT URL pass-through script + redaction; M4/M5 contracts documented |
 | **M3** ✓  | Agent live smoke: real `upstream run` → API URL → MediaMTX → RTSP/ffprobe |
 | M4        | Ingest auth: validate-stream webhook, stream-started/ended/failed callbacks |
-| M5        | ffprobe-based media validation, enforced against `expected` from M4 |
+| **M5.1** ✓ | ffprobe comparator + report-only `stream_validations` rows (no enforcement) |
+| M5.2      | flip failing comparator reports to `/v1/ingest/validation-failed` for enforcement |
 | M6        | Latest-frame JPEG snapshotter                                |
 | M7        | Processor handoff                                            |
 | M8+       | Recording, HLS production tuning, k8s deploy, multi-region   |

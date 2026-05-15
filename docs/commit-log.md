@@ -4,6 +4,108 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-15 — M5.1: Media validation (observe/report mode) ships
+
+**Type:** feature commit. Adds the M5.1 comparator on top of the M4
+lifecycle so the dashboard can surface "this publisher does not match
+its approved limits" without killing the stream.
+
+**What changed (streaming-server):**
+
+- `scripts/hooks/_compare.sh` (NEW). Pure-jq comparator. Inputs:
+  observed + expected JSON; emits a verdict `{passed, mismatch_fields,
+  warnings, failure_code, failure_message}` on stdout. Rules:
+  - `codec`: case-insensitive equality.
+  - `width` / `height`: `observed <= expected`.
+  - `fps`: `observed <= expected * 1.05` (float, 5% tolerance).
+  - `bitrate_kbps`: only enforced when `observed > 0`; ceiling
+    `expected * 1.10`. When observed is 0/null → `bitrate_unknown`
+    warning, NOT a failure (RTSP container `bit_rate` is often `N/A`).
+  - When two or more rules fail, `failure_code` becomes
+    `media_validation_failed` and the message joins each rule's
+    message with `; `.
+- `scripts/dev/test_compare.sh` (NEW). Fixture-based bash test
+  runner. 11 cases: happy, bitrate=0 warn, codec mismatch, width
+  exceed, height exceed, fps exceed, fps within tolerance, bitrate
+  exceed, case-insensitive codec, missing codec, multi-field failure.
+  No bats/shunit2 dependency — bash + jq + diff. Run with
+  `bash scripts/dev/test_compare.sh`.
+- `scripts/hooks/on_ready.sh` (EDIT — additive). After the existing
+  `stream-started` POST, four new steps:
+  1. GET `/v1/ingest/expected/{session_id}` (state-agnostic; no JWT,
+     just the webhook secret).
+  2. `_compare.sh` observed vs `expected`.
+  3. POST `/v1/ingest/stream-validations` with the verdict (report-only;
+     does NOT mark the session failed, does NOT deprovision MediaMTX).
+  4. Emit one structured log line:
+     `validation_status=true|false session_id=<uuid> mismatch=[...]
+     warnings=[...]`.
+  Critically: every new step is best-effort. A non-2xx from any of
+  them logs a `validation_*` warning and exits 0. The M4 path's
+  `stream-started` remains authoritative.
+
+**What changed (api-server, paired commit):**
+
+- `GET /v1/ingest/expected/{session_id}` — new route. State-agnostic
+  (works for sessions in `approved`, `streaming`, even `ended`),
+  webhook-secret-gated, returns the same `expected` block
+  `/v1/ingest/validate-stream` returns on accept.
+- `POST /v1/ingest/stream-validations` — new route. Inserts a
+  `stream_validations` row via a new `insert_validation_report`
+  service helper that **does not** call `_sync_camera_status`,
+  **does not** UPDATE `stream_sessions`, **does not** call
+  `deprovision_path`. Returns the unchanged session state for
+  response-shape parity with other ingest webhooks.
+- Tests: 9 new cases in `tests/test_ingest_stream_validations.py`
+  cover both endpoints' happy paths, missing/wrong webhook secret,
+  404 on missing session, state-agnostic behavior on `streaming`
+  sessions, and **state-immutability assertions** (no UPDATE against
+  `stream_sessions`, no camera mirror, no deprovision call) for both
+  `passed=true` and `passed=false` reports.
+
+**Strict non-goals (M5.2 deferred):**
+
+- `on_ready.sh` does **not** call `/v1/ingest/validation-failed` in
+  M5.1. The endpoint exists and was used by `start_session` for the
+  MediaMTX provisioning failure case (since 2026-05-15 Phase 2); the
+  hook flipping over to it is the entire M5.2 change. No other code
+  changes required for M5.2.
+- No MediaMTX path deprovisioning on mismatch.
+- No session state transition to `failed` on mismatch.
+- No dashboard changes (the contract was already wired:
+  `src/lib/api/validations.ts`, `ValidationPanel` in the camera
+  detail page).
+- No DB migration. The `stream_validations` table from
+  `20260512130300_stream_sessions.sql` is reused as-is.
+
+**Files added/changed:**
+
+- `scripts/hooks/_compare.sh` (new)
+- `scripts/dev/test_compare.sh` (new)
+- `scripts/hooks/on_ready.sh` (edit — additive)
+- `docs/stream-validation.md` (rewritten to reflect M5.1 status)
+- `docs/module-map.md` (edit — list new files)
+- `docs/follow-ups.md` (FU-2 status note — `expected` widening is
+  effectively consumed; the `allowed` rename is still open but
+  no longer blocking)
+
+**Verification:**
+
+- `bash -n scripts/hooks/*.sh scripts/dev/test_compare.sh` — clean.
+- `bash scripts/dev/test_compare.sh` — 11/11 pass.
+- API repo: `uv run pytest` — 195/195 pass. `uv run ruff check` and
+  `uv run ruff format --check` and `uv run mypy src` all clean.
+- Manual live smoke (recommended before deploy):
+  - Normal stream → two `stream_validations` rows for the session
+    (M4 `mark_streaming` + M5.1 report), both `passed=true`,
+    dashboard preview works.
+  - Mismatch stream (publish 1920×1080 into a 720p session) →
+    new row with `passed=false`, `mismatch_fields=["width","height"]`;
+    `stream_sessions.state` stays `streaming`; dashboard
+    `ValidationPanel` shows the mismatch while preview keeps playing.
+
+---
+
 ## 2026-05-15 — Tighten firewall LAN_CIDR default to /32
 
 **Type:** small but security-relevant default change in

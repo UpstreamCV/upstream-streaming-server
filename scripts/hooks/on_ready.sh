@@ -2,7 +2,7 @@
 # MediaMTX `runOnReady` hook — called once per ingest cycle when at least
 # one track is decodable on the local re-stream.
 #
-# Steps:
+# Steps (M4 lifecycle, unchanged):
 #   1. Read the streamid from `MTX_PATH` (set by MediaMTX).
 #   2. Resolve it to a session_id via `POST /v1/ingest/lookup-session`.
 #   3. ffprobe the local RTSP re-stream to read codec/width/height/fps/bitrate.
@@ -11,10 +11,16 @@
 #   4. POST `/v1/ingest/stream-started` so the API transitions the session
 #      `approved` -> `streaming` and mirrors `cameras.status` to `streaming`.
 #
-# Failure mode: log to stderr (visible via `docker compose logs mediamtx`)
-# and exit non-zero. We do NOT call `validation-failed` here — that's a
-# Phase 5 concern (ffprobe enforcement against `expected`). We just want
-# the dashboard's WHEP proxy to unblock; future M5 work tightens this.
+# Steps (M5.1 observe/report — additive, purely after `stream-started`):
+#   5. GET `/v1/ingest/expected/{session_id}` to fetch the approved limits.
+#   6. Run `scripts/hooks/_compare.sh` on observed vs expected.
+#   7. POST `/v1/ingest/stream-validations` with the verdict.
+#
+# Failure mode (M4 portion): log to stderr (visible via `docker compose
+# logs mediamtx`) and exit non-zero. We do NOT call `validation-failed`
+# anywhere in this hook — M5.1 is observe/report only. Any M5.1 step
+# that errors logs a structured warning and continues; the M4 path's
+# success is authoritative for the session.
 #
 # Required env (set by docker-compose):
 #   - UPSTREAM_API_BASE_URL              e.g. https://api.upstreamcv.com
@@ -131,3 +137,73 @@ curl -fsS --max-time 5 \
   }
 
 log "stream-started ok"
+
+# --- 5. M5.1 — fetch expected config (best-effort) ---------------------------
+#
+# M5.1 is observe/report only. Anything below this point must NOT cause the
+# hook to exit non-zero — the M4 lifecycle has already succeeded by the
+# time we get here.
+
+expected_resp=$(
+  curl -fsS --max-time 5 \
+    -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
+    "${UPSTREAM_API_BASE_URL%/}/v1/ingest/expected/${session_id}" 2>/dev/null
+) || expected_resp=""
+
+if [[ -z "$expected_resp" ]]; then
+  log "validation_expected_lookup_failed session_id=${session_id}"
+  exit 0
+fi
+
+expected=$(printf '%s' "$expected_resp" | jq -c '.expected') || expected=""
+if [[ -z "$expected" ]]; then
+  log "validation_expected_payload_invalid session_id=${session_id}"
+  exit 0
+fi
+
+# --- 6. M5.1 — run comparator ----------------------------------------------
+
+compare_script="$(dirname "$0")/_compare.sh"
+verdict=$(
+  bash "$compare_script" \
+    <(printf '%s' "$observed") \
+    <(printf '%s' "$expected")
+) || verdict=""
+
+if [[ -z "$verdict" ]]; then
+  log "validation_comparator_failed session_id=${session_id}"
+  exit 0
+fi
+
+# --- 7. M5.1 — POST report-only validation row ------------------------------
+
+passed=$(printf '%s' "$verdict" | jq -r '.passed')
+mismatch=$(printf '%s' "$verdict" | jq -c '.mismatch_fields')
+warnings=$(printf '%s' "$verdict" | jq -c '.warnings')
+
+report_payload=$(
+  jq -nc \
+    --arg sid "$session_id" \
+    --argjson p "$([[ "$passed" == "true" ]] && echo true || echo false)" \
+    --argjson obs "$observed" \
+    --argjson exp "$expected" \
+    --argjson mm "$mismatch" \
+    '{session_id:$sid, passed:$p, observed:$obs, expected:$exp, mismatch_fields:$mm}'
+)
+
+curl -fsS --max-time 5 \
+  -H "Content-Type: application/json" \
+  -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
+  -d "$report_payload" \
+  "${UPSTREAM_API_BASE_URL%/}/v1/ingest/stream-validations" \
+  >/dev/null || {
+    log "validation_report_post_failed session_id=${session_id}"
+    exit 0
+  }
+
+# Structured one-line summary. Logs only the redacted-friendly fields —
+# never $observed verbatim (it is small and non-secret, but keeping the
+# log line single-line aids grepping) and never $expected_resp (it
+# contains account/agent/camera ids — already in API logs, no need to
+# duplicate here).
+log "validation_status=${passed} session_id=${session_id} mismatch=${mismatch} warnings=${warnings}"

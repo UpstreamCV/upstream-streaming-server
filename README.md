@@ -28,7 +28,8 @@ upstream-agent  ──SRT publish──▶  upstream-streaming-server  ──fan
                                           │
                                           ├── (M4) validate session JWT with upstream-api-server
                                           ├── (M4) stream-started / stream-ended webhooks
-                                          ├── (M5) ffprobe-based media validation
+                                          ├── (M5.1 ✓) ffprobe comparator → report-only validation rows
+                                          ├── (M5.2) flip failing reports to /validation-failed for enforcement
                                           ├── (M6) latest-frame JPEG snapshotter
                                           └── (M7) processor handoff
 ```
@@ -86,7 +87,7 @@ doc marking the boundary):
   (`/v1/ingest/mediamtx-auth/{secret}`) — FU-4 in
   `docs/follow-ups.md`. Until it ships, production deploys will
   fail-closed (deny everything) because the URL 404s.
-- Media format validation (ffprobe enforcement) → `docs/stream-validation.md` (M5)
+- Media format validation: M5.1 ✓ observe/report mode; M5.2 enforcement deferred → `docs/stream-validation.md`
 - Fanout to snapshotter / processor / recording → `docs/routing.md`
 - Production deployment / Kubernetes / multi-region
 - Dashboard wiring
