@@ -50,10 +50,20 @@ publisher's SRT connection is severed within seconds of the
 
 ## FU-9 — M6.2: webhook-authed snapshot upload endpoint (`POST /v1/ingest/snapshots`)
 
-**Status:** open. **Risk:** Low — M6.1A is local-only and
-self-contained; the dashboard latest-frame card / processor cold-start
-frame simply have no remote source until this lands. No data loss, no
-lifecycle impact.
+**Status:** **resolved** (2026-05-18). Two halves shipped: the api-server
+endpoint `POST /v1/ingest/snapshots` (webhook-secret authed, identity
+derived from `session_id`) shipped as **M6.2-delta**; the streaming-server
+uploader shipped as **M6.1B** — `scripts/hooks/snapshotter.sh`
+best-effort uploads each just-published JPEG, env-gated by
+`UPSTREAM_SNAPSHOT_UPLOAD_ENABLED` (default OFF), with `session_id` +
+observed width/height injected by `on_ready.sh` step 8. Best-effort by
+contract: an upload failure only logs, never aborts the loop or the
+self-bounding exit, and self-disables after N failures while local
+extraction continues. The original description is retained below as
+history (the as-shipped streaming-server env is
+`UPSTREAM_SNAPSHOT_UPLOAD_ENABLED` + reuse of `UPSTREAM_API_BASE_URL`,
+not a single `UPSTREAM_SNAPSHOT_UPLOAD_URL`). FU-8 remains the highest
+open item.
 
 **Problem:** M6.1A (`scripts/hooks/snapshotter.sh`, spawned by
 `scripts/hooks/on_ready.sh` step 8) writes the latest frame to a local
@@ -86,8 +96,9 @@ loop or changes the self-bounding behavior. Wire the new env in
 `docker-compose.yml` / `.env.example` (M6.2-delta). No agent token —
 webhook-auth only.
 
-**Verification once shipped:** publish a passing stream; within one
-interval the latest JPEG is retrievable for that session via
+**Verification (run at live test):** with the flag enabled and a deployed
+M6.2-delta endpoint, publish a passing stream; within one interval the
+snapshotter logs `upload_ok status=201`, the JPEG is retrievable via
 `GET /v1/cameras/{id}/latest-frame` and rendered by the dashboard
 `LatestFrameCard`; an unauthenticated `POST /v1/ingest/snapshots`
 returns 401; the snapshotter still self-exits when the publisher leaves.

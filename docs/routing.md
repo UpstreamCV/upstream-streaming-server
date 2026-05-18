@@ -9,7 +9,11 @@
 > - M5.1/M5.2 (shipped): ffprobe comparator + env-gated enforcement.
 > - M6.1A (shipped): local latest-frame snapshotter — `on_ready.sh`
 >   spawns `scripts/hooks/snapshotter.sh` on a passed verdict, writing
->   `/snapshots/<path>.jpg`. Upload to the API is deferred (M6.2 / FU-9).
+>   `/snapshots/<path>.jpg`.
+> - M6.1B (shipped): the snapshotter best-effort POSTs each published
+>   frame to the webhook-authed `POST /v1/ingest/snapshots` (env-gated
+>   `UPSTREAM_SNAPSHOT_UPLOAD_ENABLED`, default OFF; resolves FU-9). Local
+>   extraction is unaffected when upload is off or failing.
 > - M7+: processor handoff, recording — still deferred per the roadmap below.
 
 ## Future fanout
@@ -24,11 +28,12 @@ SRT publish (one connection per camera)
         │
         ├──▶ RTSP / WebRTC                       (dashboard live view)
         │
-        ├──▶ latest-frame JPEG snapshotter       (M6.1A — local ✓; upload M6.2/FU-9)
-        │     • writes /snapshots/<path>.jpg every N seconds (LOCAL ONLY)
+        ├──▶ latest-frame JPEG snapshotter       (M6.1A ✓ local; M6.1B ✓ upload, env-gated)
+        │     • writes /snapshots/<path>.jpg every N seconds
         │     • spawned detached by on_ready.sh only after validation passes
-        │     • will power dashboard thumbnails + processor cold-start frame
-        │       once the M6.2 webhook-auth upload endpoint (FU-9) lands
+        │     • M6.1B: best-effort POST to /v1/ingest/snapshots (default OFF)
+        │     • powers dashboard LatestFrameCard via
+        │       GET /v1/cameras/{id}/latest-frame (signed URLs; bucket stays private)
         │
         ├──▶ upstream-processor handoff          (M7)
         │     • either pull from RTSP, or push frames via gRPC/queue
@@ -58,7 +63,7 @@ list minimal.
 ## What is intentionally NOT in this repo (M1, M2)
 
 - ffprobe-based media validation — M5.
-- Snapshotter — local extraction shipped (M6.1A); API upload deferred (M6.2 / FU-9).
+- Snapshotter — local extraction (M6.1A ✓) + best-effort API upload (M6.1B ✓, env-gated default OFF; FU-9 resolved).
 - Processor handoff — M7.
 - Recording / HLS production tuning — M8.
 - Multi-region / k8s scale-out — M8+.

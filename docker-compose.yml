@@ -83,3 +83,20 @@ services:
       UPSTREAM_SNAPSHOT_DIR: ${UPSTREAM_SNAPSHOT_DIR:-/snapshots}
       UPSTREAM_SNAPSHOT_JPEG_QUALITY: ${UPSTREAM_SNAPSHOT_JPEG_QUALITY:-3}
       UPSTREAM_SNAPSHOT_MAX_FAILURES: ${UPSTREAM_SNAPSHOT_MAX_FAILURES:-6}
+      # M6.1B local-frame auto-upload. Default OFF until live-verified
+      # against the deployed M6.2-delta endpoint (POST /v1/ingest/snapshots,
+      # webhook-secret authed). When 1, snapshotter.sh best-effort uploads
+      # each just-published JPEG; an upload failure never affects local
+      # extraction or the M4/M5 lifecycle. Reuses UPSTREAM_API_BASE_URL +
+      # UPSTREAM_MEDIAMTX_WEBHOOK_SECRET (already set above). session_id and
+      # observed width/height are injected per-stream by on_ready.sh step 8;
+      # the WIDTH/HEIGHT here are only the fallback when on_ready could not
+      # pass positive observed dimensions. UPSTREAM_SESSION_ID is
+      # intentionally NOT wired here (per-stream, like UPSTREAM_SNAPSHOT_RTSP_URL).
+      # Same `:-default` no-warning form as the M6.1A vars above.
+      UPSTREAM_SNAPSHOT_UPLOAD_ENABLED: ${UPSTREAM_SNAPSHOT_UPLOAD_ENABLED:-0}
+      UPSTREAM_SNAPSHOT_UPLOAD_MAX_FAILURES: ${UPSTREAM_SNAPSHOT_UPLOAD_MAX_FAILURES:-6}
+      UPSTREAM_SNAPSHOT_UPLOAD_TIMEOUT_SECONDS: ${UPSTREAM_SNAPSHOT_UPLOAD_TIMEOUT_SECONDS:-8}
+      UPSTREAM_SNAPSHOT_WIDTH: ${UPSTREAM_SNAPSHOT_WIDTH:-1280}
+      UPSTREAM_SNAPSHOT_HEIGHT: ${UPSTREAM_SNAPSHOT_HEIGHT:-720}
+      UPSTREAM_SNAPSHOT_UPLOAD_EVERY_N_FRAMES: ${UPSTREAM_SNAPSHOT_UPLOAD_EVERY_N_FRAMES:-1}

@@ -14,6 +14,7 @@ the real api-server's `CurrentIngest`):
     GET  /v1/ingest/expected/<id>        -> {"session_id":..., "expected":{...}}
     POST /v1/ingest/stream-validations   -> MOCK_VALIDATIONS_STATUS (default 200)
     POST /v1/ingest/validation-failed    -> MOCK_VALIDATION_FAILED_STATUS (default 200)
+    POST /v1/ingest/snapshots            -> .snapstatus sidecar (default 201)
     GET  /healthz                        -> 200 (readiness probe, no auth)
 
 Every authenticated request is appended to MOCK_RECORD_FILE as
@@ -175,6 +176,15 @@ class Handler(BaseHTTPRequestHandler):
                 _status_from_file(".vfstatus", _status("MOCK_VALIDATION_FAILED_STATUS")),
                 {"session_id": "x", "state": "failed"},
             )
+            return
+
+        if self.path == "/v1/ingest/snapshots":
+            # M6.1B upload target. body_raw (the multipart payload) is read
+            # and discarded above — this fixture only asserts routing + auth
+            # + status, never the multipart fields. Per-case status via a
+            # `.snapstatus` sidecar (default 201), mirroring `.vfstatus`.
+            self._record("POST", self.path)
+            self._send(_status_from_file(".snapstatus", 201), {"ok": True})
             return
 
         self._send(404, {"error": {"code": "not_found"}})

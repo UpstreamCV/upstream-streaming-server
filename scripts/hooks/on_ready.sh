@@ -284,7 +284,7 @@ curl -fsS --max-time 5 \
 # duplicate here).
 log "validation_status=${passed} session_id=${session_id} mismatch=${mismatch} warnings=${warnings} enforcement=${enforcement}"
 
-# --- 8. M6.1A — start local latest-frame snapshotter ------------------------
+# --- 8. M6.1A/M6.1B — start latest-frame snapshotter ------------------------
 #
 # Only when the stream is authorized + live + media-validated, i.e. the
 # comparator verdict passed. (passed=false reaches this branch only with
@@ -303,9 +303,14 @@ log "validation_status=${passed} session_id=${session_id} mismatch=${mismatch} w
 # scripts/hooks/snapshotter.sh — FU-5 means we cannot rely on
 # on_not_ready.sh / MediaMTX to stop it).
 #
-# LOCAL ONLY (M6.1A): the snapshotter writes a local JPEG and uploads
-# nothing. The webhook-authed upload endpoint POST /v1/ingest/snapshots
-# is deferred to M6.2 (tracked as FU-9 in docs/follow-ups.md).
+# M6.1B: we also inject UPSTREAM_SESSION_ID (and observed width/height
+# when positive) into ONLY the spawned snapshotter's environment via an
+# `env` prefix — a per-invocation prefix, never `export`, so the hook's
+# own env and the M4/M5 path are byte-identical. The snapshotter then
+# best-effort POSTs each published JPEG to the webhook-authed
+# POST /v1/ingest/snapshots (env-gated UPSTREAM_SNAPSHOT_UPLOAD_ENABLED,
+# default OFF; an upload failure never affects local extraction or this
+# hook). See scripts/hooks/snapshotter.sh.
 
 snapshotter_enabled="${UPSTREAM_SNAPSHOTTER_ENABLED:-1}"
 case "$snapshotter_enabled" in
@@ -315,6 +320,19 @@ esac
 
 snapshotter_script="$(dirname "$0")/snapshotter.sh"
 
+# M6.1B — env injected into ONLY the spawned snapshotter (one-shot `env`
+# prefix below). `$observed` (built at step 3) carries numeric width/height;
+# pass them only when positive, else omit so snapshotter.sh uses its own
+# UPSTREAM_SNAPSHOT_WIDTH/HEIGHT defaults. jq is guarded (`|| true` +
+# `select` + `=~` recheck) so a malformed $observed yields an empty string
+# under `set -e`, never a non-zero hook exit. session_id is resolved + non-
+# empty here (the hook exited earlier otherwise), so snap_env is never empty.
+snap_w="$(printf '%s' "$observed" | jq -r '(.width // 0) | select(. > 0)' 2>/dev/null || true)"
+snap_h="$(printf '%s' "$observed" | jq -r '(.height // 0) | select(. > 0)' 2>/dev/null || true)"
+snap_env=( "UPSTREAM_SESSION_ID=${session_id}" )
+[[ "$snap_w" =~ ^[0-9]+$ ]] && snap_env+=( "UPSTREAM_SNAPSHOT_WIDTH=${snap_w}" )
+[[ "$snap_h" =~ ^[0-9]+$ ]] && snap_env+=( "UPSTREAM_SNAPSHOT_HEIGHT=${snap_h}" )
+
 if [[ "$passed" == "true" \
       && "$snapshotter_enabled" == "true" \
       && -n "${MTX_PATH:-}" \
@@ -323,9 +341,9 @@ if [[ "$passed" == "true" \
   mkdir -p "$(dirname "$snap_log")" 2>/dev/null || true
 
   if command -v setsid >/dev/null 2>&1; then
-    setsid nohup bash "$snapshotter_script" </dev/null >>"$snap_log" 2>&1 &
+    setsid nohup env "${snap_env[@]}" bash "$snapshotter_script" </dev/null >>"$snap_log" 2>&1 &
   else
-    nohup bash "$snapshotter_script" </dev/null >>"$snap_log" 2>&1 &
+    nohup env "${snap_env[@]}" bash "$snapshotter_script" </dev/null >>"$snap_log" 2>&1 &
   fi
   disown 2>/dev/null || true
   log "snapshotter_started session_id=${session_id}"

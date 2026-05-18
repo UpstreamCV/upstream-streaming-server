@@ -369,6 +369,59 @@ UPSTREAM_API_BASE_URL=http://x UPSTREAM_MEDIAMTX_WEBHOOK_SECRET=x \
 
 Disable entirely with `UPSTREAM_SNAPSHOTTER_ENABLED=0`.
 
+## Milestone 6.1B: automatic latest-frame upload
+
+M6.1B makes the M6.1A snapshotter best-effort upload each just-published
+JPEG to the api-server's webhook-secret-authed `POST /v1/ingest/snapshots`
+(the M6.2-delta endpoint), so the dashboard `LatestFrameCard` updates with
+no manual curl. **Default OFF** (`UPSTREAM_SNAPSHOT_UPLOAD_ENABLED`). It is
+strictly best-effort: an upload failure only logs and is swallowed — it
+never aborts the snapshotter loop, never changes the self-bounding exit,
+and never touches the M4/M5 lifecycle. After
+`UPSTREAM_SNAPSHOT_UPLOAD_MAX_FAILURES` consecutive upload failures the
+snapshotter stops uploading (one log line) but keeps extracting locally.
+The storage bucket stays private — the dashboard renders via signed URLs
+from `GET /v1/cameras/{id}/latest-frame`.
+
+### Static checks (no containers)
+
+```bash
+bash -n scripts/hooks/*.sh scripts/dev/*.sh        # all parse
+bash scripts/dev/test_compare.sh                   # 11/11 (regression)
+bash scripts/dev/test_on_ready_routing.sh          # 22/22 (step 8 disabled)
+bash scripts/dev/test_snapshotter_local.sh         # 30/30 (upload default OFF)
+bash scripts/dev/test_snapshotter_upload.sh        # 26/26 (M6.1B)
+UPSTREAM_API_BASE_URL=http://x UPSTREAM_MEDIAMTX_WEBHOOK_SECRET=x \
+  docker compose config >/dev/null                 # valid
+```
+
+### Live smoke (real api-server with M6.2-delta deployed)
+
+1. Set `UPSTREAM_SNAPSHOT_UPLOAD_ENABLED=1` in `.env`;
+   `docker compose up -d --build`.
+2. Publish a **passing** stream. Watch:
+   ```bash
+   docker compose logs -f mediamtx | grep -Ei "snapshot|upload|validation"
+   ```
+   Order: `validation_status=true` → `snapshotter_started` → snapshotter
+   logs `upload_enabled=true` then `upload_ok status=201` repeatedly.
+3. `./snapshots/<MTX_PATH>.jpg` still refreshes ~every interval (local
+   extraction is unaffected by upload).
+4. `GET /v1/cameras/{camera_id}/latest-frame` returns 200; the
+   `signed_url` downloads a valid JPEG; the dashboard `LatestFrameCard`
+   updates within ~one interval **without any manual curl upload**.
+5. Stop the agent/publisher → the snapshotter hits the frame-grab cap
+   and self-exits; uploads stop (a brief `upload_failed status=409`/`000`
+   at the boundary is acceptable).
+6. M4/M5 unchanged: session still `approved → streaming → ended`;
+   `/v1/ingest/stream-started` + `/v1/ingest/stream-validations` fire
+   exactly as before. Negative: `curl -X POST <base>/v1/ingest/snapshots`
+   with no/wrong secret → 401. `docker compose down`.
+
+Disable upload with `UPSTREAM_SNAPSHOT_UPLOAD_ENABLED=0` (local
+extraction continues); disable the snapshotter entirely with
+`UPSTREAM_SNAPSHOTTER_ENABLED=0`.
+
 ## Common local-dev notes
 
 - **UDP, not TCP.** SRT is UDP/8890. Some corporate VPNs and Docker network

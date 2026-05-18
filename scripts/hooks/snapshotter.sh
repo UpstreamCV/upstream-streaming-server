@@ -54,6 +54,35 @@ RTSP_URL="${UPSTREAM_SNAPSHOT_RTSP_URL:-rtsp://127.0.0.1:8554/${MTX_PATH}}"
 MAX_FAILURES="${UPSTREAM_SNAPSHOT_MAX_FAILURES:-6}"
 FFMPEG_TIMEOUT_SECONDS="${UPSTREAM_SNAPSHOT_FFMPEG_TIMEOUT_SECONDS:-8}"
 
+# --- M6.1B: best-effort upload of the just-published JPEG ------------------
+# Default OFF: an unset UPSTREAM_SNAPSHOT_UPLOAD_ENABLED keeps pure M6.1A
+# behavior (local extraction only, no network). Parsed exactly like
+# on_ready.sh's enable flag. UPSTREAM_SESSION_ID is injected by on_ready.sh
+# step 8; width/height fall back to a 720p assumption when on_ready.sh could
+# not pass positive observed dimensions. All vars are initialized here so
+# `set -u` never trips later.
+_upload_raw="${UPSTREAM_SNAPSHOT_UPLOAD_ENABLED:-0}"
+case "$_upload_raw" in
+  1 | true | TRUE | yes | YES) UPLOAD_ENABLED="true" ;;
+  *) UPLOAD_ENABLED="false" ;;
+esac
+SESSION_ID="${UPSTREAM_SESSION_ID:-}"
+API_BASE="${UPSTREAM_API_BASE_URL:-}"
+WEBHOOK_SECRET="${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET:-}"
+UPLOAD_MAX_FAILURES="${UPSTREAM_SNAPSHOT_UPLOAD_MAX_FAILURES:-6}"
+UPLOAD_TIMEOUT_SECONDS="${UPSTREAM_SNAPSHOT_UPLOAD_TIMEOUT_SECONDS:-8}"
+SNAP_WIDTH="${UPSTREAM_SNAPSHOT_WIDTH:-1280}"
+SNAP_HEIGHT="${UPSTREAM_SNAPSHOT_HEIGHT:-720}"
+UPLOAD_EVERY_N_FRAMES="${UPSTREAM_SNAPSHOT_UPLOAD_EVERY_N_FRAMES:-1}"
+
+# Runtime upload state. UPLOAD_ACTIVE is the single effective on/off switch
+# (set by the one-time precondition check below).
+UPLOAD_ACTIVE="false"
+UPLOAD_LAST_CODE=""
+upload_fails=0
+upload_frame_counter=0
+_upload_disabled_logged="false"
+
 RUNTIME_DIR="${SNAPSHOT_DIR}/.runtime"
 LOCKDIR="${RUNTIME_DIR}/${MTX_PATH}.lock"
 OUT_FILE="${SNAPSHOT_DIR}/${MTX_PATH}.jpg"
@@ -176,6 +205,38 @@ grab_once() {
   return 0
 }
 
+# --- M6.1B: best-effort single-frame upload --------------------------------
+#
+# POSTs the just-published OUT_FILE to the webhook-authed
+# POST /v1/ingest/snapshots. STRICTLY best-effort: never aborts the loop,
+# never changes the exit code, never signals anything. curl's own stderr
+# (which can echo the URL on error) goes to /dev/null; only the numeric
+# HTTP status is captured via -w. The webhook secret rides in a header and
+# is NEVER logged; no -v / --trace / set -x anywhere, so it cannot leak.
+# A non-2xx or transport error returns 1 with UPLOAD_LAST_CODE set for the
+# caller's log line (000 = curl could not complete the request at all).
+upload_frame() {
+  local captured_at http_code
+  captured_at="$(date -u +%FT%TZ)"
+  http_code="$(
+    curl -sS -o /dev/null -w '%{http_code}' \
+      --max-time "$UPLOAD_TIMEOUT_SECONDS" \
+      -X POST \
+      -H "X-Upstream-Webhook-Secret: ${WEBHOOK_SECRET}" \
+      -F "session_id=${SESSION_ID}" \
+      -F "captured_at=${captured_at}" \
+      -F "width=${SNAP_WIDTH}" \
+      -F "height=${SNAP_HEIGHT}" \
+      -F "file=@${OUT_FILE};type=image/jpeg" \
+      "${API_BASE%/}/v1/ingest/snapshots" 2>/dev/null
+  )" || http_code="000"
+  UPLOAD_LAST_CODE="$http_code"
+  case "$http_code" in
+    2??) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- Main -------------------------------------------------------------------
 
 if ! mkdir -p "$SNAPSHOT_DIR" 2>/dev/null; then
@@ -184,6 +245,23 @@ if ! mkdir -p "$SNAPSHOT_DIR" 2>/dev/null; then
 fi
 
 acquire_lock  # may exit 0 here (duplicate / stale-race) without running
+
+# --- M6.1B upload precondition (logged exactly once) ----------------------
+if [[ "$UPLOAD_ENABLED" != "true" ]]; then
+  log "upload_enabled=false"
+elif [[ -z "$SESSION_ID" ]]; then
+  log "upload_enabled=true"
+  log "upload_skipped reason=missing_session_id"
+elif [[ -z "$API_BASE" ]]; then
+  log "upload_enabled=true"
+  log "upload_skipped reason=missing_api_base"
+elif [[ -z "$WEBHOOK_SECRET" ]]; then
+  log "upload_enabled=true"
+  log "upload_skipped reason=missing_webhook_secret"
+else
+  log "upload_enabled=true"
+  UPLOAD_ACTIVE="true"
+fi
 
 log "starting interval=${INTERVAL_SECONDS}s quality=${JPEG_QUALITY} max_failures=${MAX_FAILURES} out=${OUT_FILE}"
 
@@ -194,6 +272,37 @@ while :; do
       log "recovered after ${fails} consecutive failure(s)"
     fi
     fails=0
+
+    # M6.1B: best-effort upload of the frame we just published. Gated by
+    # UPLOAD_ACTIVE + the every-N-frames counter. An upload failure only
+    # logs and bumps its OWN counter — it never touches `fails`, never
+    # breaks the loop, never changes the exit code. After
+    # UPLOAD_MAX_FAILURES consecutive upload failures, upload self-disables
+    # for the rest of this snapshotter's life (logged once); local
+    # extraction keeps running unchanged.
+    if [[ "$UPLOAD_ACTIVE" == "true" ]]; then
+      upload_frame_counter=$((upload_frame_counter + 1))
+      if [[ "$upload_frame_counter" -ge "$UPLOAD_EVERY_N_FRAMES" ]]; then
+        upload_frame_counter=0
+        if upload_frame; then
+          if [[ "$upload_fails" -gt 0 ]]; then
+            log "upload recovered after ${upload_fails} consecutive failure(s)"
+          fi
+          upload_fails=0
+          log "upload_ok status=${UPLOAD_LAST_CODE}"
+        else
+          upload_fails=$((upload_fails + 1))
+          log "upload_failed status=${UPLOAD_LAST_CODE}"
+          if [[ "$upload_fails" -ge "$UPLOAD_MAX_FAILURES" ]]; then
+            UPLOAD_ACTIVE="false"
+            if [[ "$_upload_disabled_logged" != "true" ]]; then
+              log "upload_disabled_after_failures"
+              _upload_disabled_logged="true"
+            fi
+          fi
+        fi
+      fi
+    fi
   else
     fails=$((fails + 1))
     log "frame grab failed (${fails}/${MAX_FAILURES})"

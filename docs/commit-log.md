@@ -4,6 +4,69 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-18 — M6.1B: best-effort latest-frame upload to /v1/ingest/snapshots
+
+**Type:** feature commit. Streaming-server *uploader* half of the
+latest-frame pipeline (the api-server endpoint shipped earlier as
+M6.2-delta). Default OFF; no behavior change to M4/M5 or to M6.1A local
+extraction when disabled or when uploads fail. No api-server / dashboard
+/ agent change.
+
+**Root cause / motivation:** M6.1A wrote `/snapshots/<MTX_PATH>.jpg`
+locally only, so the dashboard `LatestFrameCard` updated only via manual
+curl. This wires the snapshotter to push frames automatically, closing
+the streaming-server half of FU-9.
+
+**What changed (streaming-server):**
+
+- `scripts/hooks/on_ready.sh` (EDIT). Step 8 now builds a one-shot
+  `env` prefix injecting `UPSTREAM_SESSION_ID=$session_id` (+ observed
+  `UPSTREAM_SNAPSHOT_WIDTH`/`HEIGHT` when positive, extracted from
+  `$observed` via guarded jq) into ONLY the spawned snapshotter, on
+  both the setsid and non-setsid spawn lines. The hook env, the M4/M5
+  path, `set -euo pipefail`, the `timeout` wrapper, the disabled
+  branch, and the hook exit code are unchanged.
+- `scripts/hooks/snapshotter.sh` (EDIT). New M6.1B env block
+  (`UPSTREAM_SNAPSHOT_UPLOAD_ENABLED` default 0, `UPSTREAM_SESSION_ID`,
+  `UPSTREAM_SNAPSHOT_UPLOAD_MAX_FAILURES`/`_TIMEOUT_SECONDS`,
+  `WIDTH`/`HEIGHT`, `UPLOAD_EVERY_N_FRAMES`); a one-time precondition
+  log (`upload_enabled=…` / `upload_skipped reason=…`); an
+  `upload_frame()` (`curl -sS -o /dev/null -w '%{http_code}'`,
+  stderr→/dev/null, multipart `session_id`/`captured_at`/`width`/
+  `height`/`file`); a gated call in the `grab_once` success branch with
+  a SEPARATE upload-failure counter that self-disables upload after
+  `UPLOAD_MAX_FAILURES` (logged once) without touching the frame-grab
+  cap, the loop, or the exit code. `set -uo pipefail` (no `-e`)
+  preserved; all new vars pre-initialized.
+- `docker-compose.yml` (EDIT). Six `${VAR:-default}` env lines after
+  `UPSTREAM_SNAPSHOT_MAX_FAILURES`. No new ports/volumes.
+- `.env.example` (EDIT). New "M6.1B" section, default 0, notes the
+  M6.2-delta endpoint must be deployed and the bucket stays private
+  (dashboard uses signed URLs).
+- `scripts/dev/mock_ingest_server.py` (EDIT). Additive
+  `POST /v1/ingest/snapshots` route behind the existing `_authed()`
+  gate; status from a `.snapstatus` sidecar (default 201); body
+  read+discarded (no multipart parse).
+- `scripts/dev/test_snapshotter_upload.sh` (NEW). Hermetic: fake
+  ffmpeg/ffprobe/timeout + real curl + `mock_ingest_server.py`. 26
+  assertions across upload-disabled, enabled-happy 201, upload-500
+  self-disable + keeps-extracting, missing session_id, missing webhook
+  secret, no-secret-in-logs.
+- Docs: README milestone tree/scope/NOT-implemented, `docs/local-dev.md`
+  ("Milestone 6.1B"), `docs/routing.md`, `docs/module-map.md`,
+  `docs/follow-ups.md` FU-9 marked resolved.
+
+**Verification:** `bash -n` clean across all hook + dev scripts;
+`test_compare.sh` 11/11; `test_on_ready_routing.sh` 22/22 (step 8
+disabled there — unaffected); `test_snapshotter_local.sh` 30/30 (upload
+defaults OFF — unaffected); `test_snapshotter_upload.sh` 26/26;
+`docker compose config` valid. Live (with
+`UPSTREAM_SNAPSHOT_UPLOAD_ENABLED=1` against a deployed M6.2-delta):
+see the "Milestone 6.1B" runbook in `docs/local-dev.md` — **not yet
+run** (needs a real agent + MediaMTX + api-server).
+
+---
+
 ## 2026-05-18 — M6.1A fix: publish snapshots mode 0644 (host-readable)
 
 **Type:** bug fix (live-test). No behavior change to M4/M5; the

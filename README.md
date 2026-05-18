@@ -30,7 +30,8 @@ upstream-agent  ──SRT publish──▶  upstream-streaming-server  ──fan
                                           ├── (M4) stream-started / stream-ended webhooks
                                           ├── (M5.1 ✓) ffprobe comparator → report-only validation rows
                                           ├── (M5.2 ✓) failed reports → /validation-failed enforcement (env-gated, default OFF)
-                                          ├── (M6.1A ✓) local latest-frame JPEG snapshotter (no upload yet)
+                                          ├── (M6.1A ✓) local latest-frame JPEG snapshotter
+                                          ├── (M6.1B ✓) best-effort upload → POST /v1/ingest/snapshots (env-gated, default OFF)
                                           └── (M7) processor handoff
 ```
 
@@ -86,10 +87,20 @@ compatibility), M3 (agent live smoke), and M4 (lifecycle webhooks).
   `/snapshots/<MTX_PATH>.jpg` (host: `./snapshots`, gitignored). It is
   self-bounding — it exits on its own after `UPSTREAM_SNAPSHOT_MAX_FAILURES`
   consecutive failures (i.e. when the publisher leaves), since MediaMTX
-  gives no guarantee of killing the hook process tree (FU-5). **LOCAL
-  ONLY:** nothing is uploaded. The webhook-authed upload endpoint
-  `POST /v1/ingest/snapshots` is deferred to M6.2 (FU-9 in
-  `docs/follow-ups.md`). Disable with `UPSTREAM_SNAPSHOTTER_ENABLED=0`.
+  gives no guarantee of killing the hook process tree (FU-5). Disable
+  with `UPSTREAM_SNAPSHOTTER_ENABLED=0`.
+- **M6.1B** — automatic upload. `on_ready.sh` injects the resolved
+  `session_id` (+ observed width/height) into the spawned snapshotter,
+  which then best-effort POSTs each just-published JPEG to the
+  webhook-authed `POST /v1/ingest/snapshots` (the M6.2-delta api-server
+  endpoint). Env-gated by `UPSTREAM_SNAPSHOT_UPLOAD_ENABLED` (**default
+  OFF**). Strictly best-effort: an upload failure only logs, never aborts
+  the loop or changes M6.1A's self-bounding exit; after
+  `UPSTREAM_SNAPSHOT_UPLOAD_MAX_FAILURES` consecutive upload failures the
+  snapshotter stops uploading (logged once) but keeps extracting locally.
+  The storage bucket stays private — the dashboard renders frames via
+  signed URLs from `GET /v1/cameras/{id}/latest-frame`. Resolves the
+  streaming-server half of FU-9.
 
 The following are **explicitly NOT implemented yet** (each has its own design
 doc marking the boundary):
@@ -99,7 +110,7 @@ doc marking the boundary):
   `docs/follow-ups.md`. Until it ships, production deploys will
   fail-closed (deny everything) because the URL 404s.
 - Media format validation: M5.1 ✓ observe/report; M5.2 ✓ enforcement (env-gated `UPSTREAM_VALIDATION_ENFORCE`, default OFF) → `docs/stream-validation.md`
-- Fanout: latest-frame snapshotter M6.1A ✓ **local only** (upload deferred → M6.2 / FU-9); processor / recording still deferred → `docs/routing.md`
+- Fanout: latest-frame snapshotter M6.1A ✓ + M6.1B ✓ upload (env-gated, default OFF; FU-9 resolved); processor / recording still deferred → `docs/routing.md`
 - Production deployment / Kubernetes / multi-region
 - Dashboard wiring
 
