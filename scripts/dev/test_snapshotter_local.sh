@@ -16,7 +16,7 @@
 #                                     when the owner is signalled
 #   4. stale-lock recovery         -> dead-pid lock reclaimed, runs, exit 0
 #   5. failure-cap bounded exit    -> exits 0 within bound, logs the cap
-#   6. atomic write                -> <MTX_PATH>.jpg published, no temp left
+#   6. atomic write                -> <MTX_PATH>.jpg published 0644, no temp
 #   7. bash -n lint               -> all hook + dev scripts parse
 #   8. ffmpeg-flag portability     -> no -rw_timeout; keeps tcp + timeout
 #
@@ -140,6 +140,11 @@ wait_file() {
     sleep 0.2
   done
   echo true
+}
+
+# file_mode <path> : octal perm bits, GNU stat then BSD stat (portable).
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
 }
 
 MTX="sess_0123456789abcdef"
@@ -272,6 +277,12 @@ shopt -u nullglob
 [[ "${#leftover[@]}" -eq 0 ]] \
   && assert true "no leftover temp files" \
   || assert false "no leftover temp files (${#leftover[@]} found)"
+# Published file must be host-readable: mktemp makes the temp 0600 and
+# `mv` preserves it, so the snapshotter must chmod 0644 before publish.
+mode="$(file_mode "${D6}/${MTX}.jpg")"
+[[ "$mode" == "644" ]] \
+  && assert true "published file is mode 0644 (host-readable)" \
+  || assert false "published file mode is 0${mode:-???}, expected 0644"
 
 # --- 7. bash -n lint --------------------------------------------------------
 echo "  case: all hook + dev scripts parse (bash -n)"

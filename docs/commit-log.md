@@ -4,6 +4,45 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-18 — M6.1A fix: publish snapshots mode 0644 (host-readable)
+
+**Type:** bug fix (live-test). No behavior change to M4/M5; the
+snapshotter contract (start gate, lock, atomic write, failure-cap exit)
+is unchanged — only the published file's mode is corrected.
+
+**Root cause:** the second live retest confirmed automatic extraction
+works (`snapshots/<MTX_PATH>.jpg` written) but the file was
+`-rw------- root root` — `file`/`ffprobe` on the host got "Permission
+denied". `mktemp` creates the temp file `0600` and `mv` preserves the
+mode, so the published JPEG inherited `0600` on the bind mount. The
+container runs as root, so the host dev user could not read it.
+
+**What changed (streaming-server):**
+
+- `scripts/hooks/snapshotter.sh` (EDIT). `grab_once` now runs
+  `chmod 0644 "$tmp"` (best-effort: failure → cleanup + `return 1`)
+  immediately **before** the atomic `mv`, so the file is host-readable
+  the instant it appears at `OUT_FILE` — no `0600` window post-publish.
+  Temp-then-`mv` atomicity, the single-instance lock, and the
+  max-failure exit are unchanged. Files stay root-owned (ownership is
+  not the issue; host readability is).
+- `scripts/dev/test_snapshotter_local.sh` (EDIT). Added a portable
+  `file_mode` helper (GNU `stat -c` then BSD `stat -f`) and a case-6
+  assertion that the published `<MTX_PATH>.jpg` is mode `0644` (the
+  fake-ffmpeg path reproduces the real `0600`-temp → publish flow, so
+  this meaningfully exercises the chmod).
+- `docs/troubleshooting.md` (EDIT). New section documenting the
+  `-rw------- Permission denied` failure mode, the chmod-before-mv fix,
+  and host verification commands.
+
+**Verification:** `bash -n` clean across all hook + dev scripts;
+`test_compare.sh` 11/11; `test_on_ready_routing.sh` 22/22;
+`test_snapshotter_local.sh` 30/30 (29 + the new 0644 assertion);
+`docker compose config` valid. Live retest: see manual steps in
+`docs/troubleshooting.md` / `docs/local-dev.md` "Milestone 6.1A".
+
+---
+
 ## 2026-05-18 — M6.1A fix: drop `-rw_timeout` (live-test ffmpeg incompat)
 
 **Type:** bug fix (live-test). No behavior change to M4/M5; the

@@ -165,6 +165,13 @@ grab_once() {
     *) rm -f "$tmp"; return 1 ;;
   esac
 
+  # `mktemp` creates the temp file 0600 and `mv` preserves that mode, so
+  # the published JPEG would land root-owned + unreadable on the host bind
+  # mount (the container runs as root). chmod the temp BEFORE the rename so
+  # the file is host-readable (0644) the instant it appears at OUT_FILE —
+  # no 0600 window post-publish. Ownership stays root for now (host
+  # readability matters, not ownership).
+  chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$OUT_FILE" || { rm -f "$tmp"; return 1; }
   return 0
 }

@@ -335,3 +335,31 @@ docker compose exec mediamtx \
     -frames:v 1 -c:v mjpeg -q:v 3 -f image2 /snapshots/manual-test.jpg
 docker compose exec mediamtx ls -lh /snapshots/manual-test.jpg
 ```
+
+## M6.1A snapshot exists on host but is unreadable (Permission denied)
+
+Symptom: `snapshots/<MTX_PATH>.jpg` exists but is `-rw------- root root`,
+and `file` / `ffprobe` on the host report **Permission denied**.
+
+Cause: the container runs as root and `mktemp` creates the temp file
+mode `0600`; `mv` preserves that mode, so the published JPEG inherited
+`0600` on the bind mount — unreadable by the host user.
+
+Fix (shipped): `scripts/hooks/snapshotter.sh` now `chmod 0644 "$tmp"`
+**before** the atomic `mv`, so the published file is host-readable
+(`0644`) the instant it appears — no `0600` window after publish. The
+file stays root-owned (ownership is not the issue; readability is).
+
+Verify on the host:
+
+```bash
+ls -l snapshots/<MTX_PATH>.jpg          # expect -rw-r--r-- (0644)
+file snapshots/<MTX_PATH>.jpg           # expect: JPEG image data ...
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=codec_name,width,height -of default=nw=1 \
+  snapshots/<MTX_PATH>.jpg              # expect codec_name=mjpeg + dims
+```
+
+If it is still `0600`, you are running an old snapshotter — rebuild /
+restart so the bind-mounted hook picks up the patched script
+(`docker compose restart mediamtx`), then re-publish.
