@@ -1,6 +1,7 @@
 # Stream validation
 
-> **Status (M5.1 SHIPPED — observe/report mode):**
+> **Status (M5.1 SHIPPED — observe/report; M5.2 SHIPPED — enforcement,
+> env-gated, default OFF):**
 >
 > - **M4** wired the lifecycle: `runOnReady` ffprobes the local
 >   re-stream, builds an `observed` payload, and POSTs
@@ -16,10 +17,14 @@
 >   dashboard's `ValidationPanel` **without** killing the stream,
 >   transitioning the session to `failed`, or deprovisioning the
 >   MediaMTX path.
-> - **M5.2** (deferred) will route the failure branch to
->   `/v1/ingest/validation-failed` and rely on the existing
->   `mark_failed` + `deprovision_path` flow. Until then, mismatches are
->   reported but not enforced.
+> - **M5.2** adds *enforcement*, gated by the optional env flag
+>   `UPSTREAM_VALIDATION_ENFORCE` (**default OFF**). When OFF the hook
+>   behaves exactly as M5.1 (observe/report only). When ON, a
+>   `passed=false` verdict POSTs `/v1/ingest/validation-failed`
+>   instead of `/stream-validations`; the API marks the session
+>   `failed`, mirrors `cameras.status='error'`, and best-effort
+>   deprovisions the MediaMTX path. Valid streams are unaffected in
+>   both modes.
 
 ## M5.1 — observe/report contract
 
@@ -94,14 +99,96 @@ token, or the raw `expected_resp` body (which carries account/agent
 /camera ids — already in the API's structured logs, no need to
 duplicate at the streaming-server layer).
 
-## M5.2 — deferred enforcement (not shipped)
+## M5.2 — enforcement (SHIPPED; env-gated; default OFF)
 
-When M5.2 lands, the only change is in the hook's failure branch: POST
-`/v1/ingest/validation-failed` (existing endpoint) instead of
-`/v1/ingest/stream-validations`. The API's `validation_failed` handler
-already calls `mark_failed` (transitions to `failed`, mirrors
-`cameras.status='error'`, deprovisions the MediaMTX path). No
-additional API work is required for M5.2.
+### The flag
+
+`UPSTREAM_VALIDATION_ENFORCE` (set via `docker-compose.yml`, sourced
+from the host shell / `.env`). Truthy values: `1`, `true`, `TRUE`,
+`yes`, `YES`. Anything else — unset, `0`, `false`, garbage — is OFF.
+**Committed default is `0`.** Do not enable in production until the
+live verification below (in particular the active-publisher question)
+has been run in staging.
+
+### Routing in `on_ready.sh` (step 7)
+
+| `passed` | enforcement | Action | Log key |
+|---|---|---|---|
+| `true` | OFF or ON | POST `/v1/ingest/stream-validations` (M5.1) | `validation_status=true … enforcement=<bool>` |
+| `false` | OFF | POST `/v1/ingest/stream-validations` (M5.1) | `validation_enforcement_disabled` + `validation_status=false … enforcement=false` |
+| `false` | ON | POST `/v1/ingest/validation-failed` (M5.2) | `validation_failed_post_ok` \| `validation_failed_post_failed` |
+
+The failed+enforce branch does **not** also POST
+`/stream-validations` — `/v1/ingest/validation-failed` already inserts
+the `passed=false` `stream_validations` row, so doing both would
+double-insert. The branch is best-effort: a non-2xx or unreachable API
+logs `validation_failed_post_failed` and exits 0 (never wedges
+MediaMTX). No additional API work was required — the
+`validation_failed` handler (`mark_failed` + `deprovision_path`)
+already existed.
+
+### M5.2 verification checklist
+
+Run with a real agent + MediaMTX. Two passes.
+
+**Enforcement OFF (`UPSTREAM_VALIDATION_ENFORCE=0` / unset):**
+
+- [ ] valid stream passes (`passed=true` row, preview works)
+- [ ] wrong-resolution stream creates a `passed=false` validation row
+- [ ] stream is **not** killed; session stays `streaming`
+- [ ] `cameras.status` stays `streaming`; dashboard preview still works
+- [ ] hook logs `validation_enforcement_disabled` for the failed stream
+
+**Enforcement ON (`UPSTREAM_VALIDATION_ENFORCE=1`):**
+
+- [ ] valid stream still passes; preview unaffected
+- [ ] wrong-resolution stream fails the comparator
+- [ ] streaming-server POSTs `/v1/ingest/validation-failed`
+      (hook logs `validation_failed_post_ok`)
+- [ ] API `stream_sessions.state` becomes `failed`
+- [ ] `ended_at` is populated
+- [ ] `failure_code` / `failure_message` stored on the session
+- [ ] a `passed=false` `stream_validations` row exists with
+      `mismatch_fields`
+- [ ] `cameras.status` becomes `error`
+- [ ] WHEP returns 409 (`session_not_streaming`) and/or the dashboard
+      exits the player state
+- [ ] the MediaMTX path is deprovisioned/deleted
+- [ ] **determine whether the already-active SRT publisher is actually
+      kicked** (see FU-8 below)
+
+### Known unknown — does path delete kick an active publisher?
+
+`validation_failed` calls `deprovision_path` →
+`DELETE /v3/config/paths/delete/{path}` (MediaMTX 1.9.3 *config*
+delete). It is **not proven** that deleting the path config evicts an
+*already-attached* SRT publisher — the path may simply be recreated by
+MediaMTX's `source: publisher` on the next packet. Live test (run
+after M5.2A, with enforcement ON):
+
+1. Start a wrong-resolution FFmpeg/agent SRT stream.
+2. Confirm the API session transitions to `failed`.
+3. `curl localhost:9997/v3/paths/list` (and `/v3/srtconns/list`).
+4. Observe whether FFmpeg exits / the SRT connection drops, or whether
+   it keeps publishing and the path reappears.
+5. If the publisher survives, implement **M5.2B** — an explicit SRT
+   connection kick (see `docs/follow-ups.md` FU-8). **M5.2B is NOT
+   implemented yet**; do not add unverified `/v3/srtconns/...` kick
+   calls until MediaMTX 1.9.3 support is confirmed.
+
+### Tests
+
+- `scripts/dev/test_compare.sh` — comparator verdicts (unchanged, 11
+  cases, still green).
+- `scripts/dev/test_on_ready_routing.sh` (NEW) — routes the hook for
+  all four pass/fail × enforce on/off combinations plus the API-409
+  best-effort case, against `scripts/dev/mock_ingest_server.py` and a
+  fake `ffprobe`. No MediaMTX / SRT / real API needed.
+- `upstream-api-server/tests/test_ingest_validation_failed.py` (NEW) —
+  route-level: success (state→failed, ended_at, failure_*, passed=false
+  row, camera→error, deprovision DELETE fired), 401 (missing/wrong
+  secret), 404 (unknown session), 409 (terminal state), best-effort
+  deprovision-failure still returns 200.
 
 ## What is intentionally NOT in this repo
 

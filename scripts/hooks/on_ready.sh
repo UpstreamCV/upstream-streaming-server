@@ -14,17 +14,34 @@
 # Steps (M5.1 observe/report — additive, purely after `stream-started`):
 #   5. GET `/v1/ingest/expected/{session_id}` to fetch the approved limits.
 #   6. Run `scripts/hooks/_compare.sh` on observed vs expected.
-#   7. POST `/v1/ingest/stream-validations` with the verdict.
+#   7. Route the verdict:
+#        - passed=true                          -> POST /v1/ingest/stream-validations (M5.1)
+#        - passed=false, enforcement OFF        -> POST /v1/ingest/stream-validations (M5.1)
+#        - passed=false, enforcement ON (M5.2)  -> POST /v1/ingest/validation-failed
+#
+# Enforcement (M5.2) is gated by the optional env flag
+# `UPSTREAM_VALIDATION_ENFORCE` and defaults OFF. When OFF the hook
+# behaves exactly as M5.1 (observe/report only — it never calls
+# `validation-failed`, never kills/deprovisions). When ON, a failed
+# verdict POSTs `/v1/ingest/validation-failed` (which marks the session
+# failed, mirrors `cameras.status='error'`, and best-effort deprovisions
+# the MediaMTX path) and does NOT also POST `/stream-validations`
+# (that endpoint already inserts the passed=false row).
 #
 # Failure mode (M4 portion): log to stderr (visible via `docker compose
-# logs mediamtx`) and exit non-zero. We do NOT call `validation-failed`
-# anywhere in this hook — M5.1 is observe/report only. Any M5.1 step
-# that errors logs a structured warning and continues; the M4 path's
+# logs mediamtx`) and exit non-zero. Everything from step 5 onward
+# (M5.1 report AND M5.2 enforcement) is best-effort: any error logs a
+# structured warning and exits 0. The M4 path's `stream-started`
 # success is authoritative for the session.
 #
 # Required env (set by docker-compose):
 #   - UPSTREAM_API_BASE_URL              e.g. https://api.upstreamcv.com
 #   - UPSTREAM_MEDIAMTX_WEBHOOK_SECRET   shared with the api-server
+#
+# Optional env (set by docker-compose; defaults OFF):
+#   - UPSTREAM_VALIDATION_ENFORCE        1/true/TRUE/yes/YES enables M5.2
+#                                        enforcement. Unset/0/false/other
+#                                        = M5.1 observe/report mode.
 #
 # Provided by MediaMTX:
 #   - MTX_PATH       e.g. sess_2a88f3405d513c05 (the SRT streamid suffix)
@@ -175,11 +192,70 @@ if [[ -z "$verdict" ]]; then
   exit 0
 fi
 
-# --- 7. M5.1 — POST report-only validation row ------------------------------
+# --- 7. Extract verdict fields ----------------------------------------------
 
 passed=$(printf '%s' "$verdict" | jq -r '.passed')
 mismatch=$(printf '%s' "$verdict" | jq -c '.mismatch_fields')
 warnings=$(printf '%s' "$verdict" | jq -c '.warnings')
+# failure_code / failure_message are null in the verdict when passed=true;
+# they are only read on the failed+enforcement branch, where _compare.sh
+# guarantees both are non-null.
+failure_code=$(printf '%s' "$verdict" | jq -r '.failure_code')
+failure_message=$(printf '%s' "$verdict" | jq -r '.failure_message')
+
+# M5.2 enforcement is OFF by default. Only an explicit truthy opt-in routes
+# the failed branch to /validation-failed. Anything else — unset, 0, false,
+# garbage — stays in M5.1 observe/report mode.
+enforce_raw="${UPSTREAM_VALIDATION_ENFORCE:-0}"
+case "$enforce_raw" in
+  1 | true | TRUE | yes | YES) enforcement="true" ;;
+  *) enforcement="false" ;;
+esac
+
+# --- 7a. M5.2 — failed verdict + enforcement ON: POST /validation-failed -----
+#
+# /v1/ingest/validation-failed already inserts a passed=false
+# stream_validations row, marks the session failed, mirrors
+# cameras.status='error', and best-effort deprovisions the MediaMTX path.
+# We must NOT also POST /stream-validations here or the failed row would
+# be inserted twice. Best-effort: log and exit 0 either way.
+
+if [[ "$passed" != "true" && "$enforcement" == "true" ]]; then
+  failed_payload=$(
+    jq -nc \
+      --arg sid "$session_id" \
+      --argjson obs "$observed" \
+      --argjson mm "$mismatch" \
+      --arg fc "$failure_code" \
+      --arg fm "$failure_message" \
+      '{session_id:$sid, observed:$obs, mismatch_fields:$mm, failure_code:$fc, failure_message:$fm}'
+  )
+
+  if curl -fsS --max-time 5 \
+      -H "Content-Type: application/json" \
+      -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
+      -d "$failed_payload" \
+      "${UPSTREAM_API_BASE_URL%/}/v1/ingest/validation-failed" \
+      >/dev/null; then
+    log "validation_failed_post_ok session_id=${session_id}"
+  else
+    log "validation_failed_post_failed session_id=${session_id}"
+  fi
+
+  # Structured one-line summary. Logs only redacted-friendly fields —
+  # never $observed verbatim, never $expected_resp (account/agent/camera
+  # ids, already in API logs), never the SRT URL or webhook secret.
+  log "validation_status=${passed} session_id=${session_id} mismatch=${mismatch} warnings=${warnings} enforcement=true"
+  exit 0
+fi
+
+# --- 7b. M5.1 — observe/report (passed=true OR failed+enforcement OFF) -------
+
+if [[ "$passed" != "true" ]]; then
+  # Failed verdict but enforcement disabled: keep M5.1 behavior, do not
+  # kill/deprovision. Surface a distinct log key for operators.
+  log "validation_enforcement_disabled session_id=${session_id}"
+fi
 
 report_payload=$(
   jq -nc \
@@ -206,4 +282,4 @@ curl -fsS --max-time 5 \
 # log line single-line aids grepping) and never $expected_resp (it
 # contains account/agent/camera ids — already in API logs, no need to
 # duplicate here).
-log "validation_status=${passed} session_id=${session_id} mismatch=${mismatch} warnings=${warnings}"
+log "validation_status=${passed} session_id=${session_id} mismatch=${mismatch} warnings=${warnings} enforcement=${enforcement}"

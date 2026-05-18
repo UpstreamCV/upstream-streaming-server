@@ -4,6 +4,82 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-17 — M5.2: Media validation enforcement (env-gated, default OFF)
+
+**Type:** feature commit. Turns the M5.1 `passed=false` verdict into
+*enforcement* — but only when explicitly opted in. Default behavior is
+unchanged from M5.1 (observe/report). No API source changes were
+required; the `validation_failed` handler (`mark_failed` +
+`deprovision_path`) already existed.
+
+**What changed (streaming-server):**
+
+- `scripts/hooks/on_ready.sh` (EDIT). Step 7 split into:
+  - extract `failure_code` / `failure_message` from the verdict (in
+    addition to the existing `passed` / `mismatch_fields` / `warnings`).
+  - read optional flag `UPSTREAM_VALIDATION_ENFORCE` (truthy: `1`,
+    `true`, `TRUE`, `yes`, `YES`; everything else OFF; default OFF).
+  - **7a** `passed=false` + enforcement ON → POST
+    `/v1/ingest/validation-failed` with `{session_id, observed,
+    mismatch_fields, failure_code, failure_message}`, same
+    `X-Upstream-Webhook-Secret` header, `--max-time 5`, best-effort
+    (`validation_failed_post_ok` / `validation_failed_post_failed`,
+    always exit 0). Does NOT also POST `/stream-validations`
+    (validation-failed already inserts the failed row).
+  - **7b** otherwise (passed=true, OR failed+enforcement OFF) → the
+    existing M5.1 `/stream-validations` POST, unchanged. A
+    failed-but-not-enforced stream logs `validation_enforcement_disabled`.
+  - the structured summary line now carries `enforcement=<bool>`.
+  - The valid-stream path is byte-for-byte M5.1 behavior.
+- `docker-compose.yml` (EDIT). Passes `UPSTREAM_VALIDATION_ENFORCE`
+  into the MediaMTX container, defaulted to `0` via
+  `${UPSTREAM_VALIDATION_ENFORCE:-0}` (unset host env stays OFF, no
+  compose warning).
+- `.env.example` (EDIT). Documents the flag; committed value `0`.
+- `scripts/dev/mock_ingest_server.py` (NEW). Stdlib mock of the ingest
+  endpoints (lookup-session / stream-started / expected /
+  stream-validations / validation-failed) that records which endpoint
+  the hook chose and serves a file-driven status for validation-failed.
+- `scripts/dev/test_on_ready_routing.sh` (NEW). Drives `on_ready.sh`
+  with a fake `ffprobe` + the mock server. 22 assertions across 5
+  cases: passed=true (off/on), passed=false (off/on), and
+  validation-failed→409 best-effort. Run with
+  `bash scripts/dev/test_on_ready_routing.sh`.
+
+**What changed (api-server):**
+
+- `tests/test_ingest_validation_failed.py` (NEW, tests only). Route
+  coverage that did not exist before: success (state→`failed`,
+  `ended_at`, `failure_code`/`failure_message`, `passed=false`
+  `stream_validations` row with `mismatch_fields`, `cameras.status`→
+  `error`, post-commit MediaMTX DELETE fired), `observed` optional →
+  `{}`, 401 missing/wrong webhook secret, 404 unknown session, 409
+  terminal state, and best-effort deprovision-failure still 200. No
+  source changes — confirmed the existing contract.
+
+**Explicit non-goals (unchanged / deliberately deferred):**
+
+- M5.1 `/v1/ingest/stream-validations` and report-only mode are
+  retained verbatim.
+- Enforcement is NOT on by default in committed config.
+- No M5.2B: no explicit MediaMTX SRT-connection kick. Whether
+  `paths/delete` evicts an *active* publisher is an open live-test
+  question (see `docs/follow-ups.md` FU-8 and the checklist in
+  `docs/stream-validation.md`). No unverified `/v3/srtconns/...` calls
+  were added.
+- No `mediamtx.yml` change, no authHTTP change, no dashboard change,
+  no processor/snapshot/sweeper/billing work.
+
+**Verification:** `bash -n` all scripts; `test_compare.sh` 11/11;
+`test_on_ready_routing.sh` 22/22; `docker compose config` valid with
+`UPSTREAM_VALIDATION_ENFORCE: "0"`. api-server: full `uv run pytest`
+202/202, `ruff check` clean, `ruff format --check` clean, `mypy src`
+clean. Live multi-pass checklist (enforcement OFF then ON) recorded in
+`docs/stream-validation.md` — **not yet run** (needs a real agent +
+MediaMTX); the active-publisher-kick line is the key open item.
+
+---
+
 ## 2026-05-15 — M5.1: Media validation (observe/report mode) ships
 
 **Type:** feature commit. Adds the M5.1 comparator on top of the M4

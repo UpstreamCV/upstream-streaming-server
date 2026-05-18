@@ -52,6 +52,11 @@ services:
       # Both must be set; hooks fail-loud (exit non-zero) if missing.
       UPSTREAM_API_BASE_URL: ${UPSTREAM_API_BASE_URL}
       UPSTREAM_MEDIAMTX_WEBHOOK_SECRET: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}
+      # M5.2 enforcement gate. Optional; defaults OFF so an unset host env
+      # keeps M5.1 observe/report behavior. 0 = M5.1 report-only; 1 = M5.2
+      # enforcement (failed validation -> POST /v1/ingest/validation-failed,
+      # which marks the session failed and may deprovision the MediaMTX path).
+      UPSTREAM_VALIDATION_ENFORCE: ${UPSTREAM_VALIDATION_ENFORCE:-0}
       # M4.1 authHTTP deny gate. MediaMTX 1.9.3 does NOT expand ${VAR}
       # references inside its own YAML, so the full URL (with the shared
       # secret as a path segment) is composed by docker-compose here and

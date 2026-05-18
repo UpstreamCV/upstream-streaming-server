@@ -6,6 +6,48 @@ item ships or is rejected.
 
 ---
 
+## FU-8 — Confirm MediaMTX path delete kicks an active SRT publisher (M5.2B gate)
+
+**Status:** open. **Risk:** Medium — if unaddressed, M5.2 enforcement
+marks the session `failed` and deletes the path config but the
+offending publisher may keep pushing media, so the "stream is
+prevented from being used" guarantee is only partially met (WHEP/db
+enforce; the live SRT ingest may not).
+
+**Problem:** M5.2 enforcement calls (api-server)
+`deprovision_path` → `DELETE /v3/config/paths/delete/{path}`. This is
+a MediaMTX 1.9.3 *config* delete. It is unverified whether deleting
+the path config evicts an *already-attached* SRT publisher, or whether
+MediaMTX's `source: publisher` simply recreates the path on the next
+packet and the publisher streams on.
+
+**Live test (run after enabling `UPSTREAM_VALIDATION_ENFORCE=1` in
+staging):**
+
+1. Start a wrong-resolution agent/FFmpeg SRT publish.
+2. Confirm api-server flips the session to `failed`.
+3. `curl localhost:9997/v3/paths/list` and
+   `curl localhost:9997/v3/srtconns/list` on the streaming-server.
+4. Observe whether FFmpeg exits / the SRT connection drops, or whether
+   it keeps publishing and the path reappears.
+
+**Required change if the publisher survives (M5.2B — sibling repo
+`upstream-api-server`, `src/upstream_api/services/mediamtx_provisioning.py`,
+alongside `deprovision_path` ~lines 150-179):** add an explicit
+SRT-connection kick — list `GET /v3/srtconns/list`, match the conn on
+`path`, then the MediaMTX-1.9.3-correct kick endpoint — and invoke it
+best-effort from the `validation_failed` handler
+(`src/upstream_api/routers/ingest.py`). **Do not add unverified
+`/v3/srtconns/...` calls until the exact 1.9.3 endpoint is confirmed
+from MediaMTX docs/source.** M5.2B is intentionally NOT implemented in
+the M5.2 commit.
+
+**Verification once shipped:** repeat the live test; the offending
+publisher's SRT connection is severed within seconds of the
+`validation-failed` call and does not auto-recreate the path.
+
+---
+
 ## FU-1 — `upstream-api-server` must allow overriding the SRT ingest host/port
 
 **Status:** **resolved** (during M3, 2026-05-13). **Previously blocked:**
