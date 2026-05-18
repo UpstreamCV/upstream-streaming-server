@@ -126,11 +126,15 @@ acquire_lock() {
 # Write to a temp file in the SAME directory as the final file so the
 # publish is an atomic same-filesystem rename — a reader (today a human;
 # a future M6.2 uploader) always sees a complete JPEG or the previous one,
-# never a torn write. The hard `timeout` wrapper is the ffmpeg-hang guard
-# (coreutils `timeout` is in the runtime image); `-rw_timeout` is the
-# in-ffmpeg I/O guard. TCP RTSP transport is required so the H.264
-# SPS/PPS parameter sets arrive (same rationale as scripts/inspect_stream.sh).
-# `-c:v mjpeg` makes the encoder explicit regardless of the temp filename.
+# never a torn write. The external `timeout` wrapper is the SOLE
+# ffmpeg-hang guard (coreutils `timeout` is in the runtime image). We do
+# NOT pass `-rw_timeout`: it is not accepted by every ffmpeg build (the
+# MediaMTX container's build rejects it with "Option rw_timeout not
+# found", which made every grab fail), and the hard `timeout` wrapper
+# already bounds a stalled read portably. TCP RTSP transport is required
+# so the H.264 SPS/PPS parameter sets arrive (same rationale as
+# scripts/inspect_stream.sh). `-c:v mjpeg` makes the encoder explicit
+# regardless of the temp filename.
 
 grab_once() {
   local tmp
@@ -139,7 +143,6 @@ grab_once() {
   if ! timeout --signal=TERM "${FFMPEG_TIMEOUT_SECONDS}s" \
         ffmpeg -nostdin -hide_banner -loglevel error -y \
           -rtsp_transport tcp \
-          -rw_timeout 5000000 \
           -i "$RTSP_URL" \
           -frames:v 1 \
           -c:v mjpeg -q:v "$JPEG_QUALITY" \

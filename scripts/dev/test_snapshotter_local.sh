@@ -18,6 +18,7 @@
 #   5. failure-cap bounded exit    -> exits 0 within bound, logs the cap
 #   6. atomic write                -> <MTX_PATH>.jpg published, no temp left
 #   7. bash -n lint               -> all hook + dev scripts parse
+#   8. ffmpeg-flag portability     -> no -rw_timeout; keeps tcp + timeout
 #
 # Run:
 #   bash scripts/dev/test_snapshotter_local.sh
@@ -283,6 +284,24 @@ for s in "${SCRIPT_DIR}"/../hooks/*.sh "${SCRIPT_DIR}"/*.sh; do
 done
 [[ "$lint_ok" == "true" ]] && assert true "bash -n clean across all scripts" \
   || assert false "bash -n clean across all scripts"
+
+# --- 8. ffmpeg-flag portability guard --------------------------------------
+# Live-test regression: the MediaMTX container's ffmpeg rejects
+# `-rw_timeout` ("Option rw_timeout not found"), which made every grab
+# fail. The external `timeout` wrapper is the portable hang guard. Keep
+# `-rw_timeout` out and `-rtsp_transport tcp` + the wrapper in.
+echo "  case: snapshotter ffmpeg flags are container-portable"
+# Inspect only non-comment lines — the rationale comment names the flag
+# on purpose; what matters is that no executable line passes it.
+grep -vE '^[[:space:]]*#' "$SNAP" | grep -q -- '-rw_timeout' \
+  && assert false "snapshotter.sh must NOT pass -rw_timeout" \
+  || assert true "snapshotter.sh does not pass -rw_timeout"
+grep -q -- '-rtsp_transport tcp' "$SNAP" \
+  && assert true "snapshotter.sh keeps -rtsp_transport tcp" \
+  || assert false "snapshotter.sh keeps -rtsp_transport tcp"
+grep -qF 'timeout --signal=TERM "${FFMPEG_TIMEOUT_SECONDS}s"' "$SNAP" \
+  && assert true "snapshotter.sh keeps the external timeout wrapper" \
+  || assert false "snapshotter.sh keeps the external timeout wrapper"
 
 echo
 echo "results: ${pass_count} passed, ${fail_count} failed"

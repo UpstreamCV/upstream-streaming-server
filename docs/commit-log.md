@@ -4,6 +4,48 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-18 — M6.1A fix: drop `-rw_timeout` (live-test ffmpeg incompat)
+
+**Type:** bug fix (live-test). No behavior change to M4/M5; the
+snapshotter's contract (when it starts, lock, atomic write, failure-cap
+exit) is unchanged — only the ffmpeg invocation is made portable.
+
+**Root cause:** the first M6.1A live test confirmed the snapshotter
+started only after `validation_status=true` and the `/snapshots` bind
+mount worked, but every grab failed and it exited at the failure cap.
+The MediaMTX container's ffmpeg build rejects `-rw_timeout` with
+`Option rw_timeout not found.`; the identical command without
+`-rw_timeout` writes a valid 1280x720 JPEG. `scripts/hooks/snapshotter.sh`
+passed `-rw_timeout 5000000`, so every grab failed before reading a
+frame.
+
+**What changed (streaming-server):**
+
+- `scripts/hooks/snapshotter.sh` (EDIT). Removed `-rw_timeout 5000000`
+  from the `grab_once` ffmpeg command and updated the rationale comment.
+  The external `timeout --signal=TERM
+  "${UPSTREAM_SNAPSHOT_FFMPEG_TIMEOUT_SECONDS}s"` wrapper is now the sole
+  (portable) hang guard; `-rtsp_transport tcp`, the same-dir temp + atomic
+  `mv`, the single-instance lock, and the max-failure exit are all
+  unchanged. No `-rw_timeout`/`-stimeout`/`-timeout` input option is used
+  (availability varies by build; the wrapper already bounds a hung read).
+- `scripts/dev/test_snapshotter_local.sh` (EDIT). New case 8: a static
+  guard asserting `snapshotter.sh` does NOT contain `-rw_timeout`, still
+  keeps `-rtsp_transport tcp`, and still wraps ffmpeg in the external
+  `timeout`. Existing fakes already ignore ffmpeg args, so cases 1–7 are
+  unchanged.
+- `docs/troubleshooting.md` (EDIT). New section documenting the
+  `Option rw_timeout not found` failure mode, the portable-wrapper
+  rationale, and an in-container manual ffmpeg retest.
+
+**Verification:** `bash -n` clean across all hook + dev scripts;
+`test_compare.sh` 11/11; `test_on_ready_routing.sh` 22/22;
+`test_snapshotter_local.sh` 29/29 (was 26 + 3 new flag-portability
+assertions); `docker compose config` valid. Live retest: see the manual
+steps in `docs/local-dev.md` "Milestone 6.1A" / `docs/troubleshooting.md`.
+
+---
+
 ## 2026-05-18 — M6.1A: Local latest-frame JPEG extraction
 
 **Type:** feature commit. Adds the streaming-server *producer* for the

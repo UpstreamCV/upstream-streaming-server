@@ -303,3 +303,35 @@ To reset the stack from scratch:
 docker compose down
 docker compose up -d
 ```
+
+## M6.1A snapshotter: every grab fails ("Option rw_timeout not found")
+
+Symptom: `on_ready.sh` logs `validation_status=true` and
+`snapshotter_started`, the `/snapshots` bind mount works, but the
+snapshotter log shows repeated `frame grab failed (N/6)` and it exits
+after the failure cap. A manual ffmpeg pull that includes `-rw_timeout`
+prints `Option rw_timeout not found.`, while the same command **without**
+`-rw_timeout` succeeds and writes a valid JPEG.
+
+Cause: `-rw_timeout` is not accepted by every ffmpeg build. The ffmpeg
+in the MediaMTX runtime image rejects it outright, so every grab failed.
+
+Fix (shipped): `scripts/hooks/snapshotter.sh` no longer passes
+`-rw_timeout`. A stalled RTSP read is bounded **portably** by the
+external hard wrapper
+`timeout --signal=TERM "${UPSTREAM_SNAPSHOT_FFMPEG_TIMEOUT_SECONDS}s"
+ffmpeg …` (coreutils `timeout`, always present in the image), and
+`-rtsp_transport tcp` is retained. No `-rw_timeout`/`-stimeout`/`-timeout`
+input option is used, since their availability varies across ffmpeg
+builds and the wrapper already caps a hung read.
+
+If you still see grab failures after this fix, confirm the stream is
+actually readable from inside the container:
+
+```bash
+docker compose exec mediamtx \
+  ffmpeg -nostdin -hide_banner -loglevel error -y \
+    -rtsp_transport tcp -i "rtsp://127.0.0.1:8554/<MTX_PATH>" \
+    -frames:v 1 -c:v mjpeg -q:v 3 -f image2 /snapshots/manual-test.jpg
+docker compose exec mediamtx ls -lh /snapshots/manual-test.jpg
+```
