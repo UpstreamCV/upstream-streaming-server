@@ -193,7 +193,11 @@ after M5.2A, with enforcement ON):
 ## What is intentionally NOT in this repo
 
 - No JWT signing or session-policy decisions — the API owns those.
-- No latest-frame snapshotter (deferred to M6).
+- Local latest-frame snapshotter shipped in M6.1A: `on_ready.sh` spawns
+  `scripts/hooks/snapshotter.sh` (detached) only on a `passed` verdict.
+  It writes a local JPEG only — upload to the API is deferred to M6.2
+  (FU-9). The snapshotter is strictly after the M5.1 report POST and
+  never alters validation routing or the hook's exit code.
 - No processor handoff (M8).
 - No `runOnConnect` deny gate — the SRT publish gate is M4.1
   `authHTTP` against `/v1/ingest/mediamtx-auth/{secret}`.

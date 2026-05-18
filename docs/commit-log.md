@@ -4,6 +4,95 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-05-18 — M6.1A: Local latest-frame JPEG extraction
+
+**Type:** feature commit. Adds the streaming-server *producer* for the
+latest-frame pipeline. LOCAL ONLY — the snapshotter writes a JPEG to a
+local file and uploads nothing. The api-server and dashboard latest-frame
+pieces already exist; the missing link was a producer. M4/M5
+auth/lifecycle/validation/enforcement behavior is unchanged except for a
+single guarded block appended to `on_ready.sh` that starts the
+snapshotter only on a `passed` verdict. No api-server / dashboard /
+agent-token changes.
+
+**What changed (streaming-server):**
+
+- `scripts/hooks/snapshotter.sh` (NEW). Not a MediaMTX hook — spawned
+  detached by `on_ready.sh`. `set -uo pipefail` (no `-e`: one ffmpeg
+  failure must not abort the loop). Env: `MTX_PATH` (required);
+  `UPSTREAM_SNAPSHOT_INTERVAL_SECONDS` (10), `UPSTREAM_SNAPSHOT_DIR`
+  (`/snapshots`), `UPSTREAM_SNAPSHOT_JPEG_QUALITY` (3),
+  `UPSTREAM_SNAPSHOT_RTSP_URL` (default
+  `rtsp://127.0.0.1:8554/${MTX_PATH}`), `UPSTREAM_SNAPSHOT_MAX_FAILURES`
+  (6), `UPSTREAM_SNAPSHOT_FFMPEG_TIMEOUT_SECONDS` (8, internal).
+  Single-instance via atomic `mkdir` lock + `pid` file + `kill -0`
+  stale-detection (no `flock` — not in the runtime image); EXIT trap
+  releases only if we own it; INT/TERM handler releases + exits.
+  `grab_once`: `timeout`-wrapped `ffmpeg -rtsp_transport tcp -rw_timeout
+  -frames:v 1 -c:v mjpeg -f image2` to a same-dir temp, validate
+  (non-empty + ffprobe codec is mjpeg/jpeg), then atomic `mv` to
+  `<MTX_PATH>.jpg`. Self-bounding: exits 0 after
+  `UPSTREAM_SNAPSHOT_MAX_FAILURES` consecutive failures (publisher gone /
+  path deleted), counter resets on success. Logs only the non-secret
+  `[snapshotter <MTX_PATH>]` prefix — never the RTSP URL / streamid /
+  secret.
+- `scripts/hooks/on_ready.sh` (EDIT). New **step 8** appended after the
+  M5.1 report log line, guarded by `[[ "$passed" == "true" ]]` (the
+  M5.2 enforcement branch is structurally `passed != true` and already
+  exited, so this is the single correct insertion point). Starts the
+  snapshotter detached (`setsid` if available, else `nohup`, `&`,
+  `disown`, stdin `</dev/null`, stdio → a per-path `.runtime` log) so it
+  outlives both the hook's normal exit and the `timeout 10s` wrapper.
+  Every step guarded (`|| true`, async launch, no `wait`) — it cannot
+  change the hook's exit code, block, or alter which `/v1/ingest/*` was
+  posted. Gated by `UPSTREAM_SNAPSHOTTER_ENABLED` (default 1; `0/false/no`
+  disables — logs `snapshotter_disabled`).
+- `docker-compose.yml` (EDIT). Adds writable `./snapshots:/snapshots:rw`
+  mount (`/hooks` stays `:ro`); passes the 5 snapshot env vars defaulted
+  via `${VAR:-default}` (unset host env keeps defaults, no compose
+  warning). `UPSTREAM_SNAPSHOT_RTSP_URL` intentionally not wired
+  (internal override only).
+- `.env.example` (EDIT). New `# --- M6.1A ... ---` section documenting
+  the vars and the LOCAL-ONLY scope.
+- `.gitignore` (EDIT) + `snapshots/.gitkeep` (NEW). Negation
+  `!snapshots/.gitkeep` keeps the bind-mount source dir tracked
+  (deterministic, avoids Docker root-auto-create); contents stay ignored.
+- `scripts/dev/test_snapshotter_local.sh` (NEW). Hermetic — fake
+  `ffmpeg`/`ffprobe`/`timeout` on PATH, no real RTSP/MediaMTX. 26
+  assertions: required-env, dir + `.runtime` creation, single-instance
+  lock (2nd instance clean no-op + owner releases on SIGTERM),
+  stale-lock recovery, bounded failure-cap exit, atomic write (no
+  leftover temp), `bash -n` lint. Run with
+  `bash scripts/dev/test_snapshotter_local.sh`.
+- `scripts/dev/test_on_ready_routing.sh` (EDIT, test-only). Adds
+  `UPSTREAM_SNAPSHOTTER_ENABLED=0` to the `env -i` allow-list + a header
+  note, so step 8 spawns nothing in a MediaMTX-less test. All 22
+  routing/exit-0 assertions unchanged.
+
+**Explicit non-goals (deliberately deferred):**
+
+- No upload, no `POST /v1/ingest/snapshots`, no api-server / dashboard /
+  agent-token changes (the agent-authed `/v1/snapshots` is not used). The
+  webhook-authed upload endpoint is tracked as **FU-9** in
+  `docs/follow-ups.md` (M6.2).
+- No retention / pruning of old JPEGs (one file per path, overwritten in
+  place; cross-path accumulation noted as deferred).
+- No `mediamtx.yml` / authHTTP change; `_compare.sh` and
+  `test_compare.sh` untouched; M5.1/M5.2 routing byte-for-byte unchanged.
+- This is M6.1A only — M6 is **not** complete.
+
+**Verification:** `bash -n` clean across all hook + dev scripts;
+`test_compare.sh` 11/11; `test_on_ready_routing.sh` 22/22 (M5 routing
+unaffected); `test_snapshotter_local.sh` 26/26; `docker compose config`
+valid (`./snapshots:/snapshots:rw` present, `/hooks` still `:ro`, the 5
+snapshot env defaults render with no warning when host env unset). Live
+smoke (publisher → snapshotter starts only after the passed verdict →
+valid JPEG refreshing ~every 10 s → snapshotter self-exits after the
+publisher stops → M4/M5 lifecycle unaffected) is recorded in
+`docs/local-dev.md` — **not yet run** (needs a real agent + MediaMTX).
+
+---
+
 ## 2026-05-17 — M5.2: Media validation enforcement (env-gated, default OFF)
 
 **Type:** feature commit. Turns the M5.1 `passed=false` verdict into

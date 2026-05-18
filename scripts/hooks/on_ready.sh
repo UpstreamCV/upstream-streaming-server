@@ -283,3 +283,52 @@ curl -fsS --max-time 5 \
 # contains account/agent/camera ids — already in API logs, no need to
 # duplicate here).
 log "validation_status=${passed} session_id=${session_id} mismatch=${mismatch} warnings=${warnings} enforcement=${enforcement}"
+
+# --- 8. M6.1A — start local latest-frame snapshotter ------------------------
+#
+# Only when the stream is authorized + live + media-validated, i.e. the
+# comparator verdict passed. (passed=false reaches this branch only with
+# enforcement OFF — we deliberately do NOT snapshot an out-of-spec stream.
+# The M5.2 enforcement branch above is structurally `passed != true` and
+# has already exited, so this `passed == "true"` guard is the single
+# correct insertion point.)
+#
+# Fully detached (nohup + background + disown, in a new session via
+# `setsid` when available) so it outlives BOTH this hook's normal exit
+# AND the `timeout 10s` wrapper at the top of this script. Best-effort:
+# it MUST NOT change this hook's exit code, MUST NOT block, MUST NOT
+# leave the hook waiting — every step here is guarded, the launch is
+# async, and there is no `wait`. The snapshotter is self-bounding: it
+# stops itself when the publisher goes away (see
+# scripts/hooks/snapshotter.sh — FU-5 means we cannot rely on
+# on_not_ready.sh / MediaMTX to stop it).
+#
+# LOCAL ONLY (M6.1A): the snapshotter writes a local JPEG and uploads
+# nothing. The webhook-authed upload endpoint POST /v1/ingest/snapshots
+# is deferred to M6.2 (tracked as FU-9 in docs/follow-ups.md).
+
+snapshotter_enabled="${UPSTREAM_SNAPSHOTTER_ENABLED:-1}"
+case "$snapshotter_enabled" in
+  0 | false | FALSE | no | NO) snapshotter_enabled="false" ;;
+  *) snapshotter_enabled="true" ;;
+esac
+
+snapshotter_script="$(dirname "$0")/snapshotter.sh"
+
+if [[ "$passed" == "true" \
+      && "$snapshotter_enabled" == "true" \
+      && -n "${MTX_PATH:-}" \
+      && -x "$snapshotter_script" ]]; then
+  snap_log="${UPSTREAM_SNAPSHOT_DIR:-/snapshots}/.runtime/${MTX_PATH}.snapshotter.log"
+  mkdir -p "$(dirname "$snap_log")" 2>/dev/null || true
+
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup bash "$snapshotter_script" </dev/null >>"$snap_log" 2>&1 &
+  else
+    nohup bash "$snapshotter_script" </dev/null >>"$snap_log" 2>&1 &
+  fi
+  disown 2>/dev/null || true
+  log "snapshotter_started session_id=${session_id}"
+elif [[ "$passed" == "true" && "$snapshotter_enabled" != "true" ]]; then
+  log "snapshotter_disabled session_id=${session_id}"
+fi

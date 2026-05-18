@@ -30,7 +30,7 @@ upstream-agent  ──SRT publish──▶  upstream-streaming-server  ──fan
                                           ├── (M4) stream-started / stream-ended webhooks
                                           ├── (M5.1 ✓) ffprobe comparator → report-only validation rows
                                           ├── (M5.2 ✓) failed reports → /validation-failed enforcement (env-gated, default OFF)
-                                          ├── (M6) latest-frame JPEG snapshotter
+                                          ├── (M6.1A ✓) local latest-frame JPEG snapshotter (no upload yet)
                                           └── (M7) processor handoff
 ```
 
@@ -79,6 +79,17 @@ compatibility), M3 (agent live smoke), and M4 (lifecycle webhooks).
   "M4.1 ingest deny gate (canonical)" for the contract. Replaces the
   abandoned runOnConnect approach disproven by the M4 hook spike (see
   `docs/commit-log.md`).
+- **M6.1A** — local latest-frame JPEG extraction. When the `runOnReady`
+  hook's media validation **passes**, `on_ready.sh` spawns
+  `scripts/hooks/snapshotter.sh` fully detached. It grabs one frame off
+  the local RTSP re-stream every ~10 s and atomically writes
+  `/snapshots/<MTX_PATH>.jpg` (host: `./snapshots`, gitignored). It is
+  self-bounding — it exits on its own after `UPSTREAM_SNAPSHOT_MAX_FAILURES`
+  consecutive failures (i.e. when the publisher leaves), since MediaMTX
+  gives no guarantee of killing the hook process tree (FU-5). **LOCAL
+  ONLY:** nothing is uploaded. The webhook-authed upload endpoint
+  `POST /v1/ingest/snapshots` is deferred to M6.2 (FU-9 in
+  `docs/follow-ups.md`). Disable with `UPSTREAM_SNAPSHOTTER_ENABLED=0`.
 
 The following are **explicitly NOT implemented yet** (each has its own design
 doc marking the boundary):
@@ -88,7 +99,7 @@ doc marking the boundary):
   `docs/follow-ups.md`. Until it ships, production deploys will
   fail-closed (deny everything) because the URL 404s.
 - Media format validation: M5.1 ✓ observe/report; M5.2 ✓ enforcement (env-gated `UPSTREAM_VALIDATION_ENFORCE`, default OFF) → `docs/stream-validation.md`
-- Fanout to snapshotter / processor / recording → `docs/routing.md`
+- Fanout: latest-frame snapshotter M6.1A ✓ **local only** (upload deferred → M6.2 / FU-9); processor / recording still deferred → `docs/routing.md`
 - Production deployment / Kubernetes / multi-region
 - Dashboard wiring
 

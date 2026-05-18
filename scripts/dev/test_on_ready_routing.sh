@@ -21,6 +21,11 @@
 # The hook must always exit 0 from the M5.x portion (best-effort: a broken
 # API/report call must never wedge MediaMTX).
 #
+# The M6.1A snapshotter is disabled here via UPSTREAM_SNAPSHOTTER_ENABLED=0
+# so on_ready.sh's new step 8 spawns nothing — there is no MediaMTX/RTSP in
+# this test, and a detached child would be irrelevant noise. Routing and
+# exit-0 assertions are unaffected (step 8 POSTs nothing either way).
+#
 # Run:
 #   bash scripts/dev/test_on_ready_routing.sh
 # Exit 0 if every case passes; non-zero otherwise.
@@ -132,6 +137,7 @@ run_case() {
     UPSTREAM_API_BASE_URL="$API_BASE" \
     UPSTREAM_MEDIAMTX_WEBHOOK_SECRET="$SECRET" \
     UPSTREAM_VALIDATION_ENFORCE="$enforce" \
+    UPSTREAM_SNAPSHOTTER_ENABLED=0 \
     MTX_PATH="sess_0123456789abcdef" \
     FAKE_PROBE_WIDTH="$width" \
     bash "$ON_READY" >/dev/null 2>"$stderr_file"

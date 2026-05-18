@@ -1,7 +1,12 @@
 .env
 logs/
 data/
-snapshots/
+# Ignore snapshot CONTENTS but not the dir itself, so the negation below
+# takes effect (git won't descend into a fully-ignored directory). Keeps
+# the M6.1A ./snapshots bind-mount source tracked & deterministic for
+# docker-compose (avoids Docker root-auto-creating it).
+snapshots/*
+!snapshots/.gitkeep
 recordings/
 *.log
 .DS_Store

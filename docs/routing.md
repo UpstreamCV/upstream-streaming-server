@@ -6,8 +6,11 @@
 >   api-server of stream lifecycle so sessions transition `approved →
 >   streaming → ended` and the dashboard's WHEP proxy unblocks. See
 >   `docs/commit-log.md` 2026-05-13 M4 entry and `scripts/hooks/`.
-> - M5+: ffprobe enforcement, snapshotter, processor handoff, recording —
->   all still deferred per the roadmap below.
+> - M5.1/M5.2 (shipped): ffprobe comparator + env-gated enforcement.
+> - M6.1A (shipped): local latest-frame snapshotter — `on_ready.sh`
+>   spawns `scripts/hooks/snapshotter.sh` on a passed verdict, writing
+>   `/snapshots/<path>.jpg`. Upload to the API is deferred (M6.2 / FU-9).
+> - M7+: processor handoff, recording — still deferred per the roadmap below.
 
 ## Future fanout
 
@@ -21,9 +24,11 @@ SRT publish (one connection per camera)
         │
         ├──▶ RTSP / WebRTC                       (dashboard live view)
         │
-        ├──▶ latest-frame JPEG snapshotter       (M6)
-        │     • writes /snapshots/<camera>.jpg every N seconds
-        │     • powers dashboard thumbnails + processor cold-start frame
+        ├──▶ latest-frame JPEG snapshotter       (M6.1A — local ✓; upload M6.2/FU-9)
+        │     • writes /snapshots/<path>.jpg every N seconds (LOCAL ONLY)
+        │     • spawned detached by on_ready.sh only after validation passes
+        │     • will power dashboard thumbnails + processor cold-start frame
+        │       once the M6.2 webhook-auth upload endpoint (FU-9) lands
         │
         ├──▶ upstream-processor handoff          (M7)
         │     • either pull from RTSP, or push frames via gRPC/queue
@@ -53,7 +58,7 @@ list minimal.
 ## What is intentionally NOT in this repo (M1, M2)
 
 - ffprobe-based media validation — M5.
-- Snapshotter — M6.
+- Snapshotter — local extraction shipped (M6.1A); API upload deferred (M6.2 / FU-9).
 - Processor handoff — M7.
 - Recording / HLS production tuning — M8.
 - Multi-region / k8s scale-out — M8+.

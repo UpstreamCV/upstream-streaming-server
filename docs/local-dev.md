@@ -301,6 +301,74 @@ Server side:
 docker compose down
 ```
 
+## Milestone 6.1A: local latest-frame snapshotter
+
+M6.1A proves the streaming server can extract a valid local JPEG latest
+frame from a **validated, live** stream. It is **LOCAL ONLY** — nothing
+is uploaded; the webhook-authed `POST /v1/ingest/snapshots` upload is
+deferred to M6.2 (FU-9). The snapshotter starts only after the
+`runOnReady` media-validation verdict is `passed`, runs detached, and
+self-exits when the publisher goes away.
+
+### Static checks (no containers)
+
+```bash
+bash -n scripts/hooks/*.sh scripts/dev/*.sh        # all parse
+bash scripts/dev/test_compare.sh                   # 11/11 (regression)
+bash scripts/dev/test_on_ready_routing.sh          # 22/22 (M5 unaffected)
+bash scripts/dev/test_snapshotter_local.sh         # 26/26 (M6.1A)
+UPSTREAM_API_BASE_URL=http://x UPSTREAM_MEDIAMTX_WEBHOOK_SECRET=x \
+  docker compose config >/dev/null                 # valid
+```
+
+### Live smoke (real api-server + a publisher)
+
+1. `mkdir -p ./snapshots` (tracked `./snapshots/.gitkeep` already keeps
+   it); `docker compose up -d --build`.
+2. Publish a **passing** stream (matches the approved profile) — via the
+   agent, or `./scripts/smoke_publish_srt.sh` against an API-issued
+   session. Watch the hook:
+   ```bash
+   docker compose logs -f mediamtx | grep -Ei "snapshot|validation|stream-started|stream-ended|ready"
+   ```
+   `[on_ready …] snapshotter_started` must appear **after** the
+   `validation_status=true …` line — never before, never on a failed
+   verdict.
+3. Confirm the file appears only post-pass and is a valid JPEG:
+   ```bash
+   ls -lh ./snapshots/
+   file ./snapshots/<MTX_PATH>.jpg
+   ffprobe -v error -select_streams v:0 \
+     -show_entries stream=codec_name,width,height -of default=nw=1 \
+     ./snapshots/<MTX_PATH>.jpg
+   ```
+   Expected `codec_name=mjpeg` and the negotiated dimensions.
+4. Confirm it refreshes ~every `UPSTREAM_SNAPSHOT_INTERVAL_SECONDS` (10 s)
+   and is never a 0-byte/partial file (atomic rename):
+   ```bash
+   watch -n1 'ls -l --time-style=full-iso ./snapshots/<MTX_PATH>.jpg 2>/dev/null || stat ./snapshots/<MTX_PATH>.jpg'
+   ```
+5. **Negative:** publish a wrong-resolution stream with enforcement OFF
+   → the hook must NOT log `snapshotter_started` and no
+   `<MTX_PATH>.jpg` is created (snapshot only on `passed=true`).
+6. **Self-bounding:** stop the publisher. Within
+   ~`MAX_FAILURES × (ffmpeg_timeout + interval)` the snapshotter logs
+   `max consecutive failures reached; exiting`. Confirm nothing lingers
+   and the lock is gone:
+   ```bash
+   docker compose exec mediamtx ps -o pid,args | grep -E "snapshotter|ffmpeg" || echo "no snapshotter/ffmpeg — good"
+   docker compose exec mediamtx ls /snapshots/.runtime/ 2>/dev/null
+   ```
+7. **Duplicate hooks:** republish quickly so `runOnReady` fires again —
+   the second snapshotter logs `another snapshotter is live (pid=…);
+   exiting` and exits 0; only one loop runs.
+8. **M4/M5 unaffected:** the session still transitions
+   `approved → streaming → ended`; `/v1/ingest/stream-started` and
+   `/v1/ingest/stream-validations` fire exactly as before; the hook
+   never wedges MediaMTX. `docker compose down`.
+
+Disable entirely with `UPSTREAM_SNAPSHOTTER_ENABLED=0`.
+
 ## Common local-dev notes
 
 - **UDP, not TCP.** SRT is UDP/8890. Some corporate VPNs and Docker network

@@ -48,6 +48,52 @@ publisher's SRT connection is severed within seconds of the
 
 ---
 
+## FU-9 — M6.2: webhook-authed snapshot upload endpoint (`POST /v1/ingest/snapshots`)
+
+**Status:** open. **Risk:** Low — M6.1A is local-only and
+self-contained; the dashboard latest-frame card / processor cold-start
+frame simply have no remote source until this lands. No data loss, no
+lifecycle impact.
+
+**Problem:** M6.1A (`scripts/hooks/snapshotter.sh`, spawned by
+`scripts/hooks/on_ready.sh` step 8) writes the latest frame to a local
+file `${UPSTREAM_SNAPSHOT_DIR}/<MTX_PATH>.jpg` only. The api-server
+already has the metadata table, `GET /v1/cameras/{id}/latest-frame`,
+Supabase Storage, and the dashboard `LatestFrameCard` — but the only
+upload endpoint (`POST /v1/snapshots`) is **agent-token-authed**, and
+the streaming server holds only the MediaMTX webhook secret. So the
+local JPEG never reaches the API.
+
+**Where (api-server):** add `POST /v1/ingest/snapshots` to
+`upstream-api-server/src/upstream_api/routers/ingest.py`, gated by the
+existing `CurrentIngest` dependency (`X-Upstream-Webhook-Secret`,
+constant-time), mirroring the shape/auth of
+`/v1/ingest/stream-validations`. Resolve `account_id`/`agent_id`/
+`camera_id` **server-side from `session_id`** (same query as
+`load_session_state` / `lookup-session`) — never trust client-supplied
+ids. Reuse the existing storage upload + `snapshots` insert + 30-day
+quota + `record_event` logic from `routers/snapshots.py` (extract a
+shared service to avoid duplication). Reject non-`streaming` sessions.
+Tests mirror `tests/test_ingest_*` (FakePool/FakeConn): happy, bad
+secret, unknown session, non-streaming session, oversize, quota.
+
+**Where (this repo):** add a best-effort upload step to
+`scripts/hooks/snapshotter.sh` after the atomic `mv` — gated by a new
+`UPSTREAM_SNAPSHOT_UPLOAD_URL` (+ reuse `UPSTREAM_MEDIAMTX_WEBHOOK_SECRET`
+and the `session_id` resolved via `lookup-session`). It must stay
+best-effort: an upload failure logs and is swallowed, never aborts the
+loop or changes the self-bounding behavior. Wire the new env in
+`docker-compose.yml` / `.env.example` (M6.2-delta). No agent token —
+webhook-auth only.
+
+**Verification once shipped:** publish a passing stream; within one
+interval the latest JPEG is retrievable for that session via
+`GET /v1/cameras/{id}/latest-frame` and rendered by the dashboard
+`LatestFrameCard`; an unauthenticated `POST /v1/ingest/snapshots`
+returns 401; the snapshotter still self-exits when the publisher leaves.
+
+---
+
 ## FU-1 — `upstream-api-server` must allow overriding the SRT ingest host/port
 
 **Status:** **resolved** (during M3, 2026-05-13). **Previously blocked:**

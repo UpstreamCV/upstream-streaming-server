@@ -1,0 +1,5 @@
+# M6.1A bind-mount source. docker-compose mounts ./snapshots -> /snapshots
+# (read-write) so scripts/hooks/snapshotter.sh can atomically write
+# <MTX_PATH>.jpg. This .gitkeep is tracked (see .gitignore negation) so the
+# directory exists with the developer's ownership before `docker compose up`.
+# All other contents of this directory are gitignored.

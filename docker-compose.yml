@@ -45,8 +45,15 @@ services:
       - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
       # M4 hook scripts mounted read-only. MediaMTX execs `/hooks/on_ready.sh`
       # and `/hooks/on_not_ready.sh` per the `runOnReady` / `runOnNotReady`
-      # entries in mediamtx.yml.
+      # entries in mediamtx.yml. on_ready.sh also spawns /hooks/snapshotter.sh
+      # (M6.1A) — still read-only; scripts never write into /hooks.
       - ./scripts/hooks:/hooks:ro
+      # M6.1A latest-frame JPEG output. WRITABLE: snapshotter.sh (spawned
+      # detached by on_ready.sh only when validation passes) atomically
+      # writes /snapshots/<MTX_PATH>.jpg here. LOCAL ONLY — nothing is
+      # uploaded yet (deferred to M6.2 / FU-9). Host ./snapshots is
+      # gitignored; ./snapshots/.gitkeep keeps the bind-mount source dir.
+      - ./snapshots:/snapshots:rw
     environment:
       # M4 webhook auth + target. Read from the host shell or `.env`.
       # Both must be set; hooks fail-loud (exit non-zero) if missing.
@@ -64,3 +71,15 @@ services:
       # override mechanism for any top-level config key. Keeping the URL
       # out of mediamtx/mediamtx.yml keeps the secret out of the file.
       MTX_AUTHHTTPADDRESS: ${UPSTREAM_API_BASE_URL}/v1/ingest/mediamtx-auth/${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}
+      # M6.1A local latest-frame snapshotter. Spawned detached by
+      # on_ready.sh ONLY when media validation passed. All optional; an
+      # unset host env keeps the documented defaults (the `:-default`
+      # form means no compose warning), same pattern as
+      # UPSTREAM_VALIDATION_ENFORCE above. LOCAL ONLY — no upload (FU-9).
+      # UPSTREAM_SNAPSHOT_RTSP_URL is intentionally NOT wired here: it is
+      # an internal override only and defaults from MTX_PATH.
+      UPSTREAM_SNAPSHOTTER_ENABLED: ${UPSTREAM_SNAPSHOTTER_ENABLED:-1}
+      UPSTREAM_SNAPSHOT_INTERVAL_SECONDS: ${UPSTREAM_SNAPSHOT_INTERVAL_SECONDS:-10}
+      UPSTREAM_SNAPSHOT_DIR: ${UPSTREAM_SNAPSHOT_DIR:-/snapshots}
+      UPSTREAM_SNAPSHOT_JPEG_QUALITY: ${UPSTREAM_SNAPSHOT_JPEG_QUALITY:-3}
+      UPSTREAM_SNAPSHOT_MAX_FAILURES: ${UPSTREAM_SNAPSHOT_MAX_FAILURES:-6}
