@@ -154,27 +154,31 @@ Run with a real agent + MediaMTX. Two passes.
 - [ ] WHEP returns 409 (`session_not_streaming`) and/or the dashboard
       exits the player state
 - [ ] the MediaMTX path is deprovisioned/deleted
-- [ ] **determine whether the already-active SRT publisher is actually
-      kicked** (see FU-8 below)
+- [ ] the already-active SRT publisher is kicked (mechanism verified
+      2026-06-11 — see below; this checklist line confirms it
+      end-to-end against the deployed api-server)
 
-### Known unknown — does path delete kick an active publisher?
+### Resolved (2026-06-11) — path delete DOES kick an active publisher
 
 `validation_failed` calls `deprovision_path` →
 `DELETE /v3/config/paths/delete/{path}` (MediaMTX 1.9.3 *config*
-delete). It is **not proven** that deleting the path config evicts an
-*already-attached* SRT publisher — the path may simply be recreated by
-MediaMTX's `source: publisher` on the next packet. Live test (run
-after M5.2A, with enforcement ON):
+delete). The M9.0 capability spike (ledger LG-5 in
+`docs/design/00-overview.md`, FU-8 in `docs/follow-ups.md`) ran the
+live test on clean-room MediaMTX 1.9.3 **and** v1.19.1: deleting the
+path config **evicts the already-attached SRT publisher** — the SRT
+connection is terminated immediately, the path is never auto-recreated
+(polled 21 s), and the publisher's ffmpeg exits. **M5.2B (an explicit
+SRT-connection kick) is therefore not required** and was dropped;
+`POST /v3/srtconns/kick/{id}` was also live-confirmed on both versions
+(ledger LG-2) and remains available as optional belt-and-braces.
+Remaining closeout — repeat once with `UPSTREAM_VALIDATION_ENFORCE=1`
+against the deployed api-server:
 
 1. Start a wrong-resolution FFmpeg/agent SRT stream.
 2. Confirm the API session transitions to `failed`.
 3. `curl localhost:9997/v3/paths/list` (and `/v3/srtconns/list`).
-4. Observe whether FFmpeg exits / the SRT connection drops, or whether
-   it keeps publishing and the path reappears.
-5. If the publisher survives, implement **M5.2B** — an explicit SRT
-   connection kick (see `docs/follow-ups.md` FU-8). **M5.2B is NOT
-   implemented yet**; do not add unverified `/v3/srtconns/...` kick
-   calls until MediaMTX 1.9.3 support is confirmed.
+4. Confirm FFmpeg exits / the SRT connection drops and the path does
+   not reappear (the expected outcome per the spike).
 
 ### Tests
 

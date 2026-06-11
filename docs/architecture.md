@@ -151,6 +151,11 @@ hostname — it uses whatever `srt_url` the API returns. See
 `docs/follow-ups.md` FU-1 for the historical "make the host configurable"
 step (resolved); per-node selection itself is a later milestone.
 
+The long-form plan for getting there — capacity model, multi-node
+ingest fleet with control-plane node assignment, per-stream isolation,
+restart/recovery design, and the load/chaos test strategy that gates
+it — lives in `docs/design/` (start at `docs/design/00-overview.md`).
+
 ## What changes in each future milestone
 
 | Milestone | What gets added                                              |

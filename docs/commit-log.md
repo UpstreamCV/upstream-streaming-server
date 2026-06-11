@@ -4,6 +4,417 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-06-11 — Docs: M9.0 MediaMTX capability spike results (ledger filled) + design-doc corrections
+
+**Type:** docs-only. No code, runtime, config-behavior, or contract
+change. Folds the M9.0 spike results into `docs/design/` and the
+trackers. The spike: web research against the bluenviron/mediamtx
+OpenAPI specs, source, and release notes at v1.9.3 and v1.19.1, plus
+**live docker tests on both versions**. Completes M9.0 (doc 07
+Phase A).
+
+**Ledger outcomes (doc 00, LG-1…LG-10 — headline items):**
+
+- **LG-5 CONFIRMED, live-verified — THE FU-8 TEST: path delete evicts.**
+  `DELETE /v3/config/paths/delete/{path}` with a live SRT publisher
+  terminates the conn immediately; the path vanishes from
+  `/v3/paths/list` and `/v3/srtconns/list` and never reappears (polled
+  21 s); ffmpeg exits. Identical on 1.9.3 and v1.19.1. **M5.2B
+  (explicit kick) is NOT required** — eviction is the existing path
+  delete already wired in validation-failed enforcement; the kick
+  stays optional belt-and-braces.
+- **LG-3 REFUTED:** `authHTTPHeaders` never existed in **any** MediaMTX
+  release through v1.19.1 — the ledger's "known present (1.11+)" cell
+  was wrong. `authHTTP*` keys are unchanged 1.9.3→1.19.1; the additions
+  are `authJWT*` and `authHTTPFingerprint` (v1.16.1, TLS cert
+  fingerprint — not custom headers). The webhook secret stays a URL
+  path segment; mitigations: api-server access-log redaction (already
+  implemented), reverse-proxy log-scrubbing runbook (M11.3),
+  dual-accept rotation.
+- **BUMP TARGET: v1.19.1** (latest stable, released 2026-06-10;
+  live-tested — accepted our 1.9.3-style config with zero key renames).
+  Rationale is no longer authHTTPHeaders or eviction (kick + eviction
+  confirmed already present in 1.9.3): richer path-labeled metrics,
+  currency/CVE window, gosrt 0.7→0.11 fixes. Re-run the agent
+  reconnect/latency smoke after the bump.
+- **LG-2 CONFIRMED, live-verified:** `POST /v3/srtconns/kick/{id}` —
+  1.9.3: 200 empty body, publisher dropped in ~4 s (ffmpeg exit 251);
+  v1.19.1: 200 `{"status":"ok"}`.
+- **LG-1 CONFIRMED both:** 1.9.3 `:9998/metrics` serves per-path series
+  (`paths{name,state}`, `paths_bytes_received/sent`) + ~50
+  `srt_conns_*` families (no HELP/TYPE comments); v1.19.1 adds a `path`
+  label on per-conn series and renames the path families to
+  `paths_inbound_bytes`/`paths_outbound_bytes`/`paths_readers`
+  (old names kept as deprecated).
+- **LG-6 REFINED:** API config mutations hot-reload in-memory and
+  preserve dynamic paths; but a `mediamtx.yml` *file* change triggers
+  reload-from-file which deletes all API-added paths (reconciler must
+  treat config-file deploys as loss events); SIGHUP is not hot-reload —
+  the process exits (code 2); restart loses all dynamic paths
+  (confirmed); a global-config API patch restarted listeners and
+  dropped the live publisher.
+- **LG-8 CONFIRMED both** (+ field caveat): `/v3/paths/list` and
+  `/v3/config/paths/list` carry the fields the designs read; v1.19.1
+  deprecates `ready`/`bytesReceived` for
+  `available`/`online(+Time)`/`inboundBytes`/`outboundBytes`/`tracks2`,
+  and **in 1.19.1 `ready` aliases `available`, not publisher-liveness —
+  post-bump, reconciler/snapshotd must read `online`**.
+- **LG-4 / LG-7 CONFIRMED-NO both:** no bandwidth caps (only the
+  read-only `MbpsMaxBW` stat) and no `srtMaxConns`-style connection
+  cap — admission control via the auth hook stays the only mechanism
+  (as designed).
+- **LG-9 CONFIRMED behavior, wording fixed:** the SRT engine is pure-Go
+  **datarhei/gosrt** (v0.7.0 @ 1.9.3, v0.11.0 @ v1.19.1), not libsrt;
+  single bound UDP socket per listener, all conns multiplexed (1 FD),
+  sends serialized via one mutex — the FD-budget and shared-buffer
+  claims survive.
+- **LG-10 CONFIRMED both:** `authMethod: http` evaluated once per
+  connection at attach, never re-evaluated mid-stream, no cache/TTL
+  knob; failures get a 2 s pause (1.9.3) / randomized anti-brute-force
+  delay (v1.19.1, #5835).
+
+**What changed:**
+
+- `docs/design/00-overview.md` (EDIT). Both ledger Verdict columns
+  filled for LG-1…LG-10 (column header now names v1.19.1); LG-9 claim
+  reworded libsrt → datarhei/gosrt; bump-decision paragraph rewritten
+  (target v1.19.1; rationale = metrics/currency/gosrt, NOT
+  authHTTPHeaders, no longer load-bearing for FU-8); FU-8 gap-table row
+  marked eviction-confirmed; Decisions table updated (bump decision →
+  accepted).
+- `docs/design/04-restart-and-recovery.md` (EDIT). §4 rewritten for the
+  LG-5 outcome: eviction = the existing path delete (already wired in
+  validation-failed enforcement); explicit kick demoted to optional
+  belt-and-braces (e.g. sweeper kicking stale publishers without
+  deprovisioning); **M5.2B declared unnecessary**; state-first ordering
+  rationale kept. §3 gains the LG-6 operational rules (config-file
+  deploys are loss events; never SIGHUP; schedule global-config API
+  patches) and the post-bump read-`online`-not-`ready` note (LG-8).
+  Decisions table + FU-8 verification bullet updated.
+- `docs/design/05-security-hardening.md` (EDIT). §4 secret-handling
+  bullet rewritten — `authHTTPHeaders` does not exist in any version
+  (M9.0 refuted LG-3); secret stays in the URL path; mitigations:
+  api-server access-log redaction (already implemented), reverse-proxy
+  log-scrubbing runbook, dual-accept rotation (unchanged). §5 bump
+  security wins re-based (drop LG-3; keep currency, v1.19.1
+  anti-brute-force delay, metrics). §7 checklist line de-headerized;
+  Decisions table gains the path-segment-with-redaction row.
+- `docs/design/01-observability.md` (EDIT). §3:
+  `session_transitions_total` relabeled to the **shipped**
+  `{from_state, to_state}` (M9.3 implemented it; `from` is a Python
+  keyword); `snapshots` noted as instrumented in
+  `ingest_webhook_total`; new **contractual future metric names** block
+  — `sweeper_stuck_sessions` (M10.1), `reconciler_path_drift` (M10.2),
+  `hookd_dead_letters` (M11.1), `session_starts_total{camera_id}`
+  (api-server; `camera_id` label required by the reconnect-storm
+  alert) — pinned by `upstream-monitoring/prometheus/alerts.yml`. §2:
+  MediaMTX metric-family names per LG-1 (1.9.3 names now; v1.19.1
+  renames after the bump).
+- `docs/design/02-capacity-and-scale.md` (EDIT). §4 snapshotd polling
+  gains the post-bump `online` field note (LG-8); §1 FD row reworded
+  libsrt → datarhei/gosrt (LG-9).
+- `docs/design/03-isolation-and-blast-radius.md` (EDIT). §2 reconciled
+  to the verdicts: libsrt → datarhei/gosrt (LG-9); LG-4 and LG-7 now
+  cited as confirmed-no (no bandwidth caps, no `srtMaxConns` — drop the
+  conditional "if a cap exists" framing); the eviction sentence cites
+  the verified path-delete behavior (LG-5) instead of "(post-FU-8)
+  kicks". Decisions table LG-4 cell: "likely nonexistent" → "confirmed
+  nonexistent".
+- `docs/design/06-testing-strategy.md` (EDIT). §4 T2 matrix names the
+  concrete v1.19.1 bump target (and the M9.0 zero-rename live result);
+  §6 `smoke_eviction.sh` row re-labeled the **FU-8 closeout gate**
+  (mechanism M9.0-verified; M5.2B dropped).
+- `docs/design/07-roadmap.md` (EDIT). Phase A table gains a Status
+  column: M9.0 ✓ done 2026-06-11; M9.1 partial (fences/ports/
+  log-rotation shipped; bump → v1.19.1 pending T2 harness); M9.2
+  partial (MediaMTX metrics + hook JSON lines + monitoring-box
+  Prometheus/Alertmanager shipped; node_exporter + snapshotter events
+  pending); M9.3 ✓ code complete (uncommitted); CI-0 ✓ for this repo +
+  agent. M10.3 row rewritten per LG-5 (M5.2B dropped; scope = sweeper
+  wiring + `smoke_eviction.sh`); M11.3 row swaps the authHTTPHeaders
+  item for the access-log scrubbing runbook; quick wins annotated;
+  bump long-pole notes the zero-rename live result.
+- `docs/follow-ups.md` (EDIT). FU-8: status updated — live test
+  **executed 2026-06-11** during the M9.0 spike on clean-room 1.9.3 and
+  v1.19.1 (delete evicts; publisher exits; path never recreated);
+  M5.2B not required (heading parenthetical updated, number kept —
+  nothing renumbered); remaining closeout = one enforce-mode repeat
+  against the deployed api-server; risk re-rated Low. FU-4: the stale
+  "authHTTPHeaders added in 1.11+" notes corrected (the key exists in
+  no release; secret stays path-segment with log-redaction
+  mitigations).
+
+**Explicitly NOT updated (historical records kept verbatim):** older
+commit-log entries that describe the pre-spike understanding
+(2026-06-10 and earlier: "1.1x bump", "no M5.2B yet", "authHTTPHeaders
+added in 1.11+") remain as written — this entry supersedes them.
+`docs/stream-validation.md` ("known unknown — does path delete kick an
+active publisher?" → "Resolved (2026-06-11)", M5.2B contingency
+dropped, enforcement checklist line updated) and `docs/stream-auth.md`
+("authHTTPHeaders added upstream in 1.11+ … migrate to a header" →
+no-header-mechanism-in-any-release with log-redaction mitigations)
+were corrected as part of this same change.
+
+**Verification:** docs-only; no scripts or containers run for this
+change (the underlying evidence is the M9.0 spike's live docker tests
+on 1.9.3 and v1.19.1, summarized in the doc 00 ledger). Consistency
+re-check performed:
+`grep -rn "authHTTPHeaders\|M5.2B\|1.1x" docs/` — every hit in
+`docs/design/*` and `docs/follow-ups.md` now states the corrected
+facts (refuted / dropped / v1.19.1); the remaining hits are the
+historical commit-log entries and the two legacy docs flagged above.
+Cross-reference check: ledger verdicts in doc 00 match their citations
+in docs 01/02/04/05/07 and FU-4/FU-8 (eviction wording, `online` field
+note, metric names, v1.19.1 target).
+
+---
+
+## 2026-06-11 — M9.1/M9.2 fragments + CI-0: compose fences, MediaMTX metrics, hook JSON telemetry, GitHub Actions T0
+
+**Type:** hardening + observability + CI. Implements the
+"quick win" fragments of M9.1 (compose resource fences, `:9997`
+scoping, docker log rotation — docs/design/03 §3 + 05 §3) and M9.2
+(MediaMTX `metrics: yes`, hook JSON event lines — docs/design/01 §2 +
+§4), plus the this-repo half of CI-0 (docs/design/07 Phase A,
+docs/design/06 §7). NOT included (still open under M9.1/M9.2): the
+MediaMTX 1.9.3 → v1.19.1 bump, node_exporter, the
+Prometheus/Alertmanager stack on the monitoring box (FU-14), and
+JSON event lines in `scripts/hooks/snapshotter.sh` (doc 01 §4 names
+`snapshotter.grab` / `snapshotter.upload`; future M9.2 work). No
+contract change: hook exit codes, routing, and every pre-existing log
+line are unchanged — the JSON lines are additive.
+
+**What changed:**
+
+- `docker-compose.yml` (EDIT). M9.1 resource fences on the mediamtx
+  service (docs/design/03 §3): `cpus`/`mem_limit` parameterized with
+  dev-laptop-safe defaults (`UPSTREAM_MEDIAMTX_CPUS:-2.0`,
+  `UPSTREAM_MEDIAMTX_MEM_LIMIT:-2g`; prod 8-vCPU node uses 6.0/12g —
+  ceilings, not reservations), `pids_limit: 1024` (fork-bomb fence —
+  hooks run in this cgroup until hookd/M11.1), `ulimits.nofile`
+  65536 soft+hard. Docker `json-file` log rotation (`max-size: 10m`,
+  `max-file: "5"`, docs/design/01 §4). Port `9997` now host-binds
+  `${UPSTREAM_MEDIAMTX_API_BIND:-127.0.0.1}` — resolves the
+  long-standing "do NOT expose 9997 publicly" TODO (docs/design/05 §3);
+  prod sets the env to 0.0.0.0 and relies on
+  `scripts/firewall-restrict-readports.sh`. New
+  `${UPSTREAM_MEDIAMTX_METRICS_BIND:-127.0.0.1}:19998:9998` mapping for
+  the M9.2 metrics port — host-published as **19998** (container 9998)
+  per the 1xxxx host-port convention and the docs/design/05 §3 port
+  table; upstream-monitoring's `prometheus/prometheus.yml` scrapes
+  `ingest.upstreamcv.com:19998` (FU-14), local scrape is
+  `127.0.0.1:19998`. Header TODO updated (no longer "no resource
+  limits / 9997 exposed"; still open: root container + read-port
+  exposure, scheduled M11.3).
+- `mediamtx/mediamtx.yml` (EDIT). `metrics: yes` +
+  `metricsAddress: :9998` (docs/design/01 §2, ledger LG-1). The
+  `metrics` action was already in `authHTTPExclude`. Stale `:9997`
+  production TODO comment rewritten to describe the resolved M9.1
+  posture. Also corrects the factually wrong authHTTP comment: the
+  secret rides in the URL path because MediaMTX's authHTTP request has
+  a fixed JSON body and no custom-header mechanism in ANY released
+  version (M9.0 spike checked through v1.19.1 — `authHTTPHeaders` was
+  never "added in 1.11+"); mitigations are api-server access-log
+  redaction (already implemented there) and the existing
+  reverse-proxy log-scrubbing production note.
+- `scripts/firewall-restrict-readports.sh` (EDIT). Covers the M9.2
+  metrics port: new tagged DOCKER-USER rules for container port 9998
+  (host-published 19998) with a SEPARATE allow-list from the read
+  ports — loopback plus a new `MONITORING_IP` env (the monitoring
+  box's IP), NOT the api-server IP. Fail-closed: the DROP catch-all
+  (v4 + v6) installs unconditionally, so an unset `MONITORING_IP`
+  leaves the metrics port blocked for every non-loopback source (the
+  script prints a note when that happens). Same idempotent
+  tag-comment/remove-then-insert style; `--remove` strips the new
+  rules too. Header docs, usage text, and the verification snippets
+  updated (19998 added to the port story).
+- `scripts/hooks/_log.sh` (NEW). M9.2 hook telemetry helper
+  (docs/design/01 §4): `emit_evt <hook> <phase> <outcome> <status>
+  [start_ms]` prints exactly one JSON line to stdout —
+  `{"evt":"<hook>.<phase>","path":...,"session_id":...,"outcome":
+  "ok|fail","status":<int-or-0>,"ms":<int>}` — built with jq when
+  available, printf with explicit JSON escaping otherwise. Hard
+  contract: no URLs/JWTs/passphrases/webhook secret in any field, and
+  `emit_evt`/`evt_now_ms` always return 0 so a telemetry failure can
+  never change a hook's exit code under `set -euo pipefail`.
+- `scripts/hooks/on_ready.sh` (EDIT). Sources `_log.sh` (guarded, with
+  no-op fallbacks) and emits one event per existing phase boundary:
+  `lookup`, `ffprobe`, `stream_started`, `expected_fetch`, `compare`,
+  then `report` OR `validation_failed` (matching the M5.1/M5.2
+  routing), and `snapshotter_spawn`. All stderr log lines kept as-is.
+  Every curl phase captures the real HTTP status via the
+  on_not_ready.sh step-1 pattern (`-o <resp> -w '%{http_code}'`) so
+  the JSON `status` field carries real codes (e.g. 201 per doc 01 §4)
+  instead of 0. curl `-f` is kept, every if/else branch and exit code
+  is unchanged; on failure the captured code is passed through with
+  non-numeric (connect failure) coerced to 0.
+- `scripts/hooks/on_not_ready.sh` (EDIT). Same pattern: `lookup`
+  (outcome=ok with status 404 on the idempotent already-cleaned-up
+  branch; fail + real status otherwise) and `stream_ended`.
+- `.github/workflows/ci.yml` (NEW, CI-0). On push + pull_request,
+  ubuntu-latest: installs jq, `bash -n` over every `scripts/**/*.sh`,
+  runs the four hermetic T0 suites (`test_compare.sh`,
+  `test_on_ready_routing.sh`, `test_snapshotter_local.sh`,
+  `test_snapshotter_upload.sh`), and a compose-validation job
+  (`cp .env.example .env && docker compose config -q`).
+- `.env.example` (EDIT). Documents the four new envs
+  (`UPSTREAM_MEDIAMTX_CPUS`, `_MEM_LIMIT`, `_API_BIND`,
+  `_METRICS_BIND`) with dev defaults and prod guidance
+  (6.0 / 12g / 0.0.0.0 + firewall allow-lists per docs/design/05 §3);
+  the `_METRICS_BIND` note spells out the 19998 host port / 9998
+  container port split, the `127.0.0.1:19998` local scrape, and the
+  firewall script's `MONITORING_IP` fail-closed behavior.
+
+**Verification:** all four T0 suites pass locally
+(`bash scripts/dev/test_compare.sh` 11/11,
+`test_on_ready_routing.sh` 22/22, `test_snapshotter_local.sh` 30/30,
+`test_snapshotter_upload.sh` 26/26). `bash -n` clean over every script
+in `scripts/` (including the edited firewall script and hooks).
+`docker compose config -q` validates; rendered config confirms
+cpus/mem_limit/pids_limit/nofile/log-rotation, the 127.0.0.1 `host_ip`
+on 9997, and the metrics mapping rendering as `target: 9998` /
+`published: "19998"`. Manual end-to-end hook runs against
+`scripts/dev/mock_ingest_server.py` (pass, fail+enforce, and
+api-unreachable cases): every stdout line parses with `jq -ce`, the
+expected `evt` sequence appears on each branch, the JSON `status`
+field now carries the real HTTP code (200 on the mock's happy-path
+endpoints; 401 on a wrong-secret lookup fail; 409 on the
+enforcement-branch `/validation-failed` fail; 0 on connect failure),
+exit codes are unchanged (1 on lookup/stream-started/stream-ended
+failure, 0 on the best-effort M5.x branch), no curl response temp
+files leak, and the webhook secret appears in no captured
+stdout/stderr. Both serializer paths exercised (jq present and a
+jq-less PATH); hostile `MTX_PATH` values (quotes/backslash/newline)
+escape correctly and never fail the caller. The firewall script's new
+metrics rules were NOT live-applied (iptables needs root on the Linux
+ingest host) — apply and run the script's own verification snippets
+(19998 reachable from the monitoring box only) on next deploy. Live
+MediaMTX `/metrics` scrape and the doc 01 §8 Prometheus target check
+remain for the M9.2 monitoring-box deployment (FU-14);
+`docker compose up` was deliberately not run here.
+
+---
+
+## 2026-06-10 — Docs: ingest-hardening design set (docs/design/00–07)
+
+**Type:** docs-only. No code, runtime, config-behavior, or contract
+change. Adds the design documents for hardening the stream-ingest
+pipeline to 1000s of concurrent streams; all behavioral work is
+scheduled as future milestones (M9–M12) and follow-ups (FU-10…FU-14).
+
+**What changed:**
+
+- `docs/design/00-overview.md` (NEW). Goals/non-goals, reference stream
+  profile (1080p30 H.264 / 4 Mbps / GoP 1s / SRT 200ms), doc map, and
+  the **MediaMTX capability verification ledger** (LG-1…LG-10) — every
+  MediaMTX capability claim the set relies on, verified by an M9.0
+  spike before any dependent milestone ships. Records the decision to
+  bump MediaMTX 1.9.3 → 1.1x early (M9.1).
+- `docs/design/01-observability.md` (NEW). Sequenced first: MediaMTX
+  `/metrics` + node_exporter scraped by Prometheus on the
+  upstream-monitoring box (Kuma keeps black-box/status-page role);
+  api-server `/metrics` behind the reserved token + Sentry init;
+  one-JSON-line-per-phase hook logging; SLI/SLO table (auth success
+  ≥99%, time-to-streaming p95 <8s, stuck sessions, hook failure rate,
+  path-drift gauge, reconnect storms, node headroom); ≤8 email alerts.
+- `docs/design/02-capacity-and-scale.md` (NEW). Per-stream budget
+  (remux-only media is cheap; **process churn from per-stream hooks/
+  snapshot loops is the real ceiling**); 250-streams/node hypothesis on
+  8 vCPU/16 GB gated on load tests; `snapshotd` (one bounded-worker
+  container per node) replacing per-path `snapshotter.sh`; multi-node
+  via **control-plane node assignment** at `/v1/stream-sessions/start`
+  (SRT/UDP can't sit behind an L7 LB) with a `media_nodes` registry and
+  per-node DNS names; control-plane scaling (heartbeat 15s, coalesced
+  writes, Caddy node-IP exemption).
+- `docs/design/03-isolation-and-blast-radius.md` (NEW). Stream/node/
+  plane bulkheads: kernel UDP buffer sizing, container cgroup fences
+  (cpus/mem/pids/nofile; hookd + snapshotd as separately-fenced
+  containers), tenant spread (≥2 nodes per account, ≤50% of a node),
+  fail-closed admission kept by choice, failure-mode table. Introduces
+  **hookd** — hooks shrink to spool-writers; a node daemon executes the
+  webhook pipeline with bounded concurrency, retries + dead-letter, and
+  per-path FIFO (fixes no-retries, fork storms, and missing hook
+  metrics with one mechanism; env-gated, legacy mode preserved).
+- `docs/design/04-restart-and-recovery.md` (NEW). Resolves the FU trio:
+  FU-5 sweeper (expiry clause finally wiring `expired` + 3–5 min
+  heartbeat-staleness clause, report-only first); FU-7 reconciler
+  (api-side 30s path diff + node boot ping, ≤5s recovery target); FU-8
+  eviction (ordered DB-state-flip → path delete → `srtconns` kick).
+  Agent-side: `/renew` endpoint at 80% TTL (over teardown/restart),
+  supervisor-scoped heartbeat emitting `reconnecting`, `buffer_ms`
+  resolved as accepted no-op. End-to-end restart matrix with detection
+  + target recovery times; every infrastructure row maps to a chaos
+  test (agent-local rows stay in the agent's hermetic suite).
+- `docs/design/05-security-hardening.md` (NEW). Non-root/read-only/
+  cap-drop containers; MediaMTX image shrink toward stock post-hookd;
+  templated per-node port/firewall table (resolves the `:9997` TODO);
+  webhook secret → header on ≥1.11; dual-accept secret rotation
+  runbook; SOPS+age for host secrets; Sentry init + per-token rate
+  limits on the api-server.
+- `docs/design/06-testing-strategy.md` (NEW). Five tiers: T0 hermetic
+  (keep all existing suites), T1 **contract case table** run against
+  both the dev mocks and a real api-server (drift = red build), T2
+  docker-compose integration with a real-MediaMTX version matrix, T3
+  load (pre-encoded copy-loop SRT publishers, ramp/storm/two-node/
+  soak), T4 chaos mapped to the restart matrix's infrastructure rows
+  (incl. `smoke_eviction.sh` as the M5.2B acceptance gate); GitHub
+  Actions plan (CI exists only in api-server today; CI-0 adds this repo
+  + agent); acceptance-criteria table per FU.
+- `docs/design/07-roadmap.md` (NEW). Four phases — A see & fence
+  (M9.0–M9.3 + CI-0), B recover (M10.1–M10.4), C contain
+  (M11.1–M11.3), D scale (M12.1–M12.4) — each item tagged with its
+  repo and gating test tier; quick wins, long poles, explicit
+  deferrals (multi-region, fanout relays, encoded-frame buffering).
+- `docs/follow-ups.md` (EDIT). Registered FU-10 (node registry/
+  assignment, api-server), FU-11 (session-less heartbeats + `/renew`,
+  api-server), FU-12 (agent persistent heartbeat + renewal,
+  upstream-agent), FU-13 (Caddy ingest-route exemption for node IPs,
+  api-server), FU-14 (Prometheus/Alertmanager stack, monitoring).
+  FU-5/FU-7/FU-8 gained "design accepted, scheduled M10.x" status
+  notes — they close only on their own verification steps.
+- `docs/architecture.md` (EDIT). "Horizontal scaling note" now points
+  at `docs/design/` as the long-form plan.
+
+**Verification:** docs-only. Cross-reference check performed: every FU
+cited in `docs/design/` exists in `docs/follow-ups.md`; every MediaMTX
+capability claim cites a ledger entry with a verify-by milestone
+(M9.0); every roadmap milestone names its gating test tier; quoted
+config values (hook timeouts 10s/8s, curl `--max-time 5`, snapshot
+interval 10s/max-failures 6, session TTL 4h, `stream_sessions` state
+enum, port map) match the current tree. No scripts or smoke tests were
+run.
+
+---
+
+## 2026-06-10 — Docs: correct stale FU-4 status + compose header
+
+**Type:** docs-only. No code, runtime, config-behavior, or contract
+change — only stale documentation corrected to match shipped state.
+Prompted by an architecture review of stream-ingest
+hardening/scalability.
+
+**What changed:**
+
+- `docs/follow-ups.md` FU-4 marked **resolved**: the api-server
+  `POST /v1/ingest/mediamtx-auth/{secret}` endpoint is now implemented
+  (`upstream-api-server/src/upstream_api/routers/ingest.py`), so the SRT
+  deny gate is live end-to-end. Was previously "partially shipped /
+  remaining work is the real api-server endpoint." Contract/spec retained
+  as history; operational closeout = run `scripts/smoke_authhttp_deny.sh`
+  against the deployed endpoint.
+- `docker-compose.yml` header (EDIT). Replaced the stale "Milestone 1:
+  local smoke testing only. No auth, no media validation, no webhooks"
+  banner — all three shipped (M4.1 auth gate, M5 ffprobe validation, M4
+  lifecycle webhooks, M6 snapshotter). Header now reflects the shipped
+  lifecycle and points at the still-open production-hardening TODOs
+  (resource limits, non-root, :9997 / read-port exposure).
+
+**Verification:** docs-only;
+`grep -n "mediamtx-auth" ../upstream-api-server/src/upstream_api/routers/ingest.py`
+confirms the endpoint exists. No scripts or smoke tests were re-run.
+
+---
+
 ## 2026-05-18 — M6.1B: best-effort latest-frame upload to /v1/ingest/snapshots
 
 **Type:** feature commit. Streaming-server *uploader* half of the

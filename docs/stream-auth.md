@@ -135,10 +135,16 @@ MediaMTX 1.9.3 calls a single HTTP URL for every auth event via
 - `authHTTPExclude: [api, metrics, pprof, read, playback]`. Only `publish`
   hits the api-server in M4 — read/playback auth is later work.
 
-The secret rides in the URL path segment because MediaMTX 1.9.3 has no
-`authHTTPHeaders` support (added upstream in 1.11+). When MediaMTX is
-bumped to 1.11+, migrate the secret out of the path into a header so it
-stops appearing in URL access logs.
+The secret rides in the URL path segment because MediaMTX's authHTTP
+request has a fixed JSON body and **no custom-header mechanism in any
+released version** — the M9.0 capability spike (2026-06-11, ledger LG-3
+in `docs/design/00-overview.md`) verified that `authHTTPHeaders` does
+not exist in any release through v1.19.1 (the earlier "added upstream
+in 1.11+" claim here was wrong). Mitigations instead: the api-server
+redacts the path segment in its access logs (shipped —
+`AccessLogMiddleware`), and production reverse proxies must scrub it
+from theirs; rotation uses the dual-accept pattern
+(`docs/design/05-security-hardening.md` §4).
 
 ### Request — `POST /v1/ingest/mediamtx-auth/{secret}`
 

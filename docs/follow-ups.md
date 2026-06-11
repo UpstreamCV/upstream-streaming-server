@@ -6,20 +6,142 @@ item ships or is rejected.
 
 ---
 
-## FU-8 — Confirm MediaMTX path delete kicks an active SRT publisher (M5.2B gate)
+## FU-10 — Media-node registry + control-plane node assignment
 
-**Status:** open. **Risk:** Medium — if unaddressed, M5.2 enforcement
-marks the session `failed` and deletes the path config but the
-offending publisher may keep pushing media, so the "stream is
-prevented from being used" guarantee is only partially met (WHEP/db
-enforce; the live SRT ingest may not).
+**Status:** open (design accepted in `docs/design/02-capacity-and-scale.md`
+§5, scheduled M12.1 per `docs/design/07-roadmap.md`). **Risk:** none
+today — single-node operation is unaffected until a second node is
+registered.
 
-**Problem:** M5.2 enforcement calls (api-server)
-`deprovision_path` → `DELETE /v3/config/paths/delete/{path}`. This is
-a MediaMTX 1.9.3 *config* delete. It is unverified whether deleting
-the path config evicts an *already-attached* SRT publisher, or whether
-MediaMTX's `source: publisher` simply recreates the path on the next
-packet and the publisher streams on.
+**Where (api-server):** new `media_nodes` table (id, name, srt host/port,
+`mediamtx_api_base_url`, status active/draining/dead, `max_streams`,
+`last_heartbeat_at`, capacity jsonb); nullable `node_id` FK on
+`stream_sessions`; webhook-secret-authed `POST /v1/ingest/node-heartbeat`;
+node selection at `POST /v1/stream-sessions/start` returning a
+node-specific SRT URL (healthy-filter → camera reconnect locality →
+least-loaded → tenant-spread tie-break). The single MediaMTX base-URL
+env becomes a registry row; with one node registered there is zero
+behavior change.
+
+**Verification once shipped:** with two registered nodes, 500 load-test
+streams distribute within ±10% of even (doc 06 T3 two-node scenario),
+and killing one node reassigns its publishers to the survivor via fresh
+`/start` calls.
+
+---
+
+## FU-11 — Session-less heartbeats + session renewal endpoint
+
+**Status:** open (design accepted in `docs/design/04-restart-and-recovery.md`
+§5, scheduled M10.4). **Risk:** Low — without it the agent cannot report
+`reconnecting` between attempts and every session hard-stops at the 4h
+TTL.
+
+**Where (api-server):** (1) heartbeats: `session_id` is **already
+nullable** (schema + DB column) and `status=reconnecting` is already
+accepted — the only new field is `last_session_id` so a between-attempts
+heartbeat can reference the session it lost (plus dashboard handling);
+(2) new `POST /v1/stream-sessions/{id}/renew` (agent-token authed) that
+extends `expires_at` by the standard TTL on an `approved`/`streaming`
+session — no rekey, never resurrects a terminal session. Pairs with
+FU-12 on the agent side; makes the FU-5 sweeper's 3-minute staleness
+threshold safe.
+
+**Verification once shipped:** with staging TTL shrunk to 2 minutes, a
+10-minute agent stream renews ≥ 4 times with zero media gaps; a
+heartbeat with `session_id=null, status=reconnecting` is accepted and
+visible to the dashboard.
+
+---
+
+## FU-12 — Agent: persistent heartbeat + proactive session renewal
+
+**Status:** open (design accepted in `docs/design/04-restart-and-recovery.md`
+§5, scheduled M10.4). Sibling repo `upstream-agent` — public pip
+library; its commits carry no Claude attribution.
+
+**Where (upstream-agent):** lift `HeartbeatReporter` from session scope
+to supervisor scope so it survives between recovery attempts and emits
+the already-defined-but-never-sent `reconnecting` status; call FU-11's
+`/renew` from the heartbeat thread at 80% of session TTL; honor a
+server-tunable heartbeat interval from the `/start` response (default
+moves 5s → 15s); document `stream.buffer_ms` as accepted no-op (raw-frame
+ring buffer rejected — ~6 MB/frame at 1080p; see design doc).
+
+**Verification once shipped:** kill ffmpeg mid-stream; during backoff
+the api receives `reconnecting` heartbeats (dashboard no longer flaps
+`streaming → error → streaming`); a long-running stream crosses the TTL
+boundary without interruption.
+
+---
+
+## FU-13 — Caddy rate-limit exemption for media-node ingest traffic
+
+**Status:** open (design accepted in `docs/design/02-capacity-and-scale.md`
+§6, scheduled M12.1). **Risk:** Medium at scale — a node reboot fires up
+to ~250 near-simultaneous `runOnReady` chains from one IP; at the current
+600 req/min/IP cap on `/v1/*`, Caddy throttles the storm into orphaned
+sessions.
+
+**Where (api-server, deploy/Caddyfile):** exempt registered node IPs from
+the per-IP rate limit **on `/v1/ingest/*` only** (or raise that route's
+limit to 6000/min for those IPs). No exemption on any other route.
+
+**Verification once shipped:** the doc 06 T3 reconnect-storm scenario
+(kill + restart all publishers at once) completes with zero 429 responses
+on `/v1/ingest/*` and zero orphaned sessions.
+
+---
+
+## FU-14 — Prometheus/Alertmanager on the monitoring box + scrape access
+
+**Status:** open (design accepted in `docs/design/01-observability.md`,
+scheduled M9.2). **Risk:** none functionally — but every report-only
+rollout in the hardening set (sweeper, reconciler, eviction) is
+unverifiable without it, so it blocks Phase B acceptance.
+
+**Where (upstream-monitoring):** add Prometheus + Alertmanager services
+to `docker-compose.yml` next to Uptime Kuma (Kuma keeps the black-box /
+status-page role); scrape targets = media nodes' `:9998` (MediaMTX;
+host-published `:19998`), `:9100` (node_exporter), `:9101` (hookd,
+later), `:9102` (snapshotd, later), and the api-server `/metrics`
+(bearer token). Firewall holes: monitoring box IP → those
+ports only (extends this repo's `firewall-restrict-readports.sh`
+pattern; port table in `docs/design/05-security-hardening.md` §3).
+
+**Verification once shipped:** all targets show `up` in Prometheus; the
+"node down" alert email fires within 4 minutes of stopping MediaMTX on a
+staging node and resolves on restart.
+
+---
+
+## FU-8 — Confirm MediaMTX path delete kicks an active SRT publisher (was the M5.2B gate; M5.2B dropped 2026-06-11 — delete evicts)
+
+**Status:** open, **mechanism verified** — the live test below was
+**EXECUTED 2026-06-11 during the M9.0 capability spike** on clean-room
+MediaMTX 1.9.3 **and** v1.19.1 (ledger LG-5 in
+`docs/design/00-overview.md`): `DELETE /v3/config/paths/delete/{path}`
+with a live SRT publisher **evicts it** — the SRT connection is
+terminated, the path is never auto-recreated (polled 21 s), and the
+publisher's ffmpeg exits. **M5.2B (an explicit SRT kick) is therefore
+NOT required** — eviction is the existing path delete, already wired in
+the validation-failed enforcement path; the kick endpoint
+(`POST /v3/srtconns/kick/{id}`, also live-confirmed on both versions —
+ledger LG-2) stays available as optional belt-and-braces
+(`docs/design/04-restart-and-recovery.md` §4, updated). Remaining
+closeout: repeat the test once with `UPSTREAM_VALIDATION_ENFORCE=1`
+against the **deployed api-server** (the original staged recipe below).
+**Risk:** now Low — the enforcement guarantee holds on clean-room
+MediaMTX; only the deployed end-to-end confirmation is outstanding.
+
+**Problem (resolved by the M9.0 spike):** M5.2 enforcement calls
+(api-server) `deprovision_path` → `DELETE /v3/config/paths/delete/{path}`.
+This is a MediaMTX 1.9.3 *config* delete. It was unverified whether
+deleting the path config evicts an *already-attached* SRT publisher, or
+whether MediaMTX's `source: publisher` simply recreates the path on the
+next packet and the publisher streams on. **Answer (2026-06-11): it
+evicts** — on both 1.9.3 and v1.19.1 the conn is terminated immediately
+and the path never reappears.
 
 **Live test (run after enabling `UPSTREAM_VALIDATION_ENFORCE=1` in
 staging):**
@@ -31,20 +153,21 @@ staging):**
 4. Observe whether FFmpeg exits / the SRT connection drops, or whether
    it keeps publishing and the path reappears.
 
-**Required change if the publisher survives (M5.2B — sibling repo
-`upstream-api-server`, `src/upstream_api/services/mediamtx_provisioning.py`,
-alongside `deprovision_path` ~lines 150-179):** add an explicit
-SRT-connection kick — list `GET /v3/srtconns/list`, match the conn on
-`path`, then the MediaMTX-1.9.3-correct kick endpoint — and invoke it
-best-effort from the `validation_failed` handler
-(`src/upstream_api/routers/ingest.py`). **Do not add unverified
-`/v3/srtconns/...` calls until the exact 1.9.3 endpoint is confirmed
-from MediaMTX docs/source.** M5.2B is intentionally NOT implemented in
-the M5.2 commit.
+**Required change if the publisher survives — NOT TRIGGERED.** The
+publisher does not survive (M9.0 spike, ledger LG-5), so the M5.2B
+change described here (an explicit SRT-connection kick in
+`upstream-api-server`'s `mediamtx_provisioning.py`, invoked from the
+`validation_failed` handler) is **not required** and is dropped. For
+the record, the kick endpoint was confirmed anyway:
+`POST /v3/srtconns/kick/{id}` exists and works on both 1.9.3 (200,
+empty body) and v1.19.1 (200 `{"status":"ok"}`) — ledger LG-2 — and
+remains available as optional belt-and-braces (e.g. sweeper kicking a
+stale publisher without deprovisioning; `docs/design/04` §4).
 
-**Verification once shipped:** repeat the live test; the offending
-publisher's SRT connection is severed within seconds of the
-`validation-failed` call and does not auto-recreate the path.
+**Verification to close this FU:** repeat the live test once with
+`UPSTREAM_VALIDATION_ENFORCE=1` against the deployed api-server; the
+offending publisher's SRT connection is severed within seconds of the
+`validation-failed` call and the path does not auto-recreate.
 
 ---
 
@@ -217,15 +340,20 @@ caller receives an `allowed=true` response with the four IDs and an
 
 ## FU-4 — Ingest deny gate (`mediamtx-auth` endpoint in api-server)
 
-**Status:** partially shipped. Streaming-server side is done as M4.1
-(see `docs/commit-log.md`): MediaMTX `authMethod: http` now POSTs every
-SRT publish attempt to `${UPSTREAM_API_BASE_URL}/v1/ingest/mediamtx-auth/{secret}`
-and drops the connection on non-2xx, **before any media flows**.
-Verified locally with `scripts/smoke_authhttp_deny.sh` against
-`scripts/dev/mock_authhttp_server.py`. The **remaining work** is the
-real api-server endpoint — until it ships, the streaming server only
-denies when a stand-in service is reachable; the production deploy
-will fail-closed (deny everything) because the real URL 404s.
+**Status:** **resolved** (2026-06-10). Both sides shipped. Streaming-server
+side landed as M4.1 (see `docs/commit-log.md`): MediaMTX `authMethod: http`
+POSTs every SRT publish attempt to
+`${UPSTREAM_API_BASE_URL}/v1/ingest/mediamtx-auth/{secret}` and drops the
+connection on non-2xx, **before any media flows** (verified locally with
+`scripts/smoke_authhttp_deny.sh` against `scripts/dev/mock_authhttp_server.py`).
+The api-server endpoint is now implemented —
+`POST /v1/ingest/mediamtx-auth/{secret}` in
+`upstream-api-server/src/upstream_api/routers/ingest.py` (constant-time
+secret check → `load_session_by_streamid` → 200 only for an `approved`,
+unexpired session, else 401). The deny gate is therefore live end-to-end;
+the remaining step is purely operational — run the "Verification" recipe
+below against the *deployed* api-server endpoint to close it out. The
+contract/spec below is retained as history.
 
 **Why the original plan changed:** the M4 hook spike (see
 `docs/commit-log.md` M4.1 entry) proved that MediaMTX 1.9.3 hooks
@@ -239,8 +367,10 @@ which gates at SRT handshake before media is accepted.
 Contract is documented in `upstream-streaming-server/docs/stream-auth.md`
 under "M4.1 ingest deny gate". Summary:
 
-- `{secret}` is path-segment because MediaMTX 1.9.3 has no
-  `authHTTPHeaders` (added in 1.11+). Compare constant-time against
+- `{secret}` is path-segment because MediaMTX has no `authHTTPHeaders`
+  — in **any** release: the "added in 1.11+" note that originally stood
+  here was wrong (corrected 2026-06-11 by the M9.0 spike, ledger LG-3;
+  see the corrected follow-up note below). Compare constant-time against
   `Settings.mediamtx_webhook_secret`. Mismatch → 401, no body.
 - Body shape:
   ```json
@@ -271,15 +401,27 @@ known-good `ALLOWED_PATH=<real sess_xxx>` plus the bogus case. Bogus
 case should deny with `max_frames=0`; real case should pass through
 and the existing `runOnReady` hook should fire `stream-started`.
 
-**Follow-up:** when MediaMTX is bumped to 1.11+, migrate the secret
-out of the URL path segment and into an `authHTTPHeaders` entry so
-secrets stop appearing in URL access logs.
+**Follow-up (corrected 2026-06-11, M9.0 spike — ledger LG-3 refuted):**
+the original note here ("when MediaMTX is bumped to 1.11+, migrate the
+secret into an `authHTTPHeaders` entry") was wrong — `authHTTPHeaders`
+does **not exist in any MediaMTX release** through v1.19.1; the
+authHTTP request has a fixed JSON body and no custom-header mechanism
+(the only related additions are `authJWT*` and `authHTTPFingerprint`,
+which is a TLS cert fingerprint, not a header). The secret therefore
+**stays a URL path segment** permanently; mitigations are api-server
+access-log redaction (already implemented), the reverse-proxy
+log-scrubbing runbook (M11.3), and dual-accept rotation — see
+`docs/design/05-security-hardening.md` §4.
 
 ---
 
 ## FU-7 — Periodic reconciler for MediaMTX restart recovery
 
-**Status:** open. **Risk:** Low — only affects in-flight sessions
+**Status:** open — design accepted in
+`docs/design/04-restart-and-recovery.md` §3 (api-side 30s diff loop +
+node boot ping + drift gauge; tightens the 60s sketch below), scheduled
+M10.2. Closes only on the verification step below. **Risk:** Low — only
+affects in-flight sessions
 during a streaming-server restart; new sessions are unaffected and
 the agent's automatic `/start` retry handles new connections.
 
@@ -322,7 +464,12 @@ is superseded; per-session was the design that shipped.
 
 ## FU-5 — Hooks orphan on container kill
 
-**Status:** open. **Risk:** Low — heartbeats and session expiry both
+**Status:** open — design accepted in
+`docs/design/04-restart-and-recovery.md` §2 (api-side sweeper: expiry
+clause wiring the never-set `expired` state + heartbeat-staleness clause,
+report-only first), scheduled M10.1; the staleness threshold depends on
+FU-11/FU-12 persistent heartbeats. Closes only on the verification step
+below. **Risk:** Low — heartbeats and session expiry both
 back-stop, but the cameras list view will incorrectly show "Streaming"
 for up to the session TTL when the streaming-server dies mid-stream.
 
