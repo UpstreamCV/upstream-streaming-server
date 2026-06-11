@@ -4,6 +4,27 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-06-11 — Fix documented firewall-script usage: env vars go AFTER sudo
+
+**Type:** docs-only (script header comments + perception-fanout doc).
+`MONITORING_IP=x sudo bash scripts/firewall-restrict-readports.sh` —
+the form the script itself documented — does not work: sudo's
+`env_reset` strips the variable before the script runs, so it silently
+falls back to the fail-closed default (metrics port blocked for the
+monitoring box). Observed live during the M9.2 rollout. Correct form:
+`sudo MONITORING_IP=x bash scripts/...` (sudo passes leading VAR=val
+arguments through). All usage examples corrected (script header,
+LAN_CIDR example, docs/perception-fanout.md FANOUT_PROXY_IP example)
+plus an explicit warning note. Also recorded: `--persist` aborts before
+saving if apt has an unrelated half-configured package (set -e); the
+direct fallback is `sudo netfilter-persistent save`.
+
+**Verification:** ran the corrected form on the ingest box — the
+monitoring RETURN rule for the metrics port installs and the
+monitoring box's scrape succeeds.
+
+---
+
 ## 2026-06-11 — perception-fanout sidecar: 10–15 Hz detection-overlay hot path
 
 **Why:** the dashboard's live bounding-box overlay was capped at ~1–3

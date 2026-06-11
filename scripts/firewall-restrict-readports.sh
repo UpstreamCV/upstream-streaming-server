@@ -55,10 +55,13 @@
 #   sudo bash scripts/firewall-restrict-readports.sh                 # apply, no persist
 #   sudo bash scripts/firewall-restrict-readports.sh --persist       # apply + save across reboot
 #   sudo bash scripts/firewall-restrict-readports.sh --remove        # undo
-#   AWS_API_SERVER_IP=1.2.3.4 sudo bash scripts/firewall-restrict-readports.sh
-#   MONITORING_IP=5.6.7.8 sudo bash scripts/firewall-restrict-readports.sh
+#   sudo AWS_API_SERVER_IP=1.2.3.4 bash scripts/firewall-restrict-readports.sh
+#   sudo MONITORING_IP=5.6.7.8 bash scripts/firewall-restrict-readports.sh
 #     # ^ opens the metrics port (host 19998) to the monitoring box only;
 #     #   omit it and the metrics port stays blocked off-box.
+#     # NOTE: env assignments go AFTER `sudo` (sudo's env_reset strips
+#     # `VAR=x sudo ...`-style variables before the script ever runs —
+#     # the script would silently fall back to its fail-closed default).
 #
 
 set -euo pipefail
@@ -77,7 +80,7 @@ set -euo pipefail
 # covered separately, so the only legitimate "LAN" consumer is the
 # streaming-server reaching its own published ports during local dev /
 # smoke testing. Other deploys with a different LAN topology can
-# override via env (`LAN_CIDR=10.0.0.0/24 sudo bash ...`) for
+# override via env (`sudo LAN_CIDR=10.0.0.0/24 bash ...`) for
 # development.
 AWS_API_SERVER_IP="${AWS_API_SERVER_IP:-<api-ip>}"
 LAN_CIDR="${LAN_CIDR:-10.0.0.16/32}"
