@@ -3,10 +3,27 @@
 # Brings up a single MediaMTX container that listens for SRT publishes,
 # republishes over RTSP/WebRTC, and exposes a local HTTP API for inspection.
 #
-# Milestone 1: local smoke testing only. No auth, no media validation, no
-# webhooks back to upstream-api-server. See docs/local-dev.md for usage and
-# docs/stream-auth.md / docs/stream-validation.md for what is intentionally
-# deferred.
+# As of M4/M5/M6 this same compose file also drives the shipped lifecycle
+# against upstream-api-server: the `authMethod: http` SRT deny gate (M4.1),
+# the runOnReady/runOnNotReady hooks (stream-started/ended webhooks + M5
+# ffprobe media validation), and the M6 latest-frame snapshotter. The
+# earlier "local smoke testing only, no auth/validation/webhooks" note was
+# accurate at M1 and is no longer true. See docs/local-dev.md for usage and
+# docs/architecture.md for the milestone map.
+#
+# M9.1 hardening (docs/design/03-isolation-and-blast-radius.md §3,
+# docs/design/05-security-hardening.md §3): resource fences
+# (cpus/mem_limit/pids_limit/nofile), json-file log rotation, and
+# localhost-by-default host bindings for :9997 (API) and :19998 (metrics
+# host port; container :9998, M9.2). Dev-laptop-safe defaults; production
+# overrides via the
+# UPSTREAM_MEDIAMTX_* envs documented in .env.example plus
+# scripts/firewall-restrict-readports.sh for the opened ports.
+#
+# Production hardening still TODO: container runs as root and the read
+# ports (8554/8889) bind all interfaces (locked down only by
+# scripts/firewall-restrict-readports.sh) — non-root/read-only/cap-drop
+# is scheduled M11.3 (docs/design/05 §2).
 
 services:
   mediamtx:
@@ -18,6 +35,30 @@ services:
       dockerfile: Dockerfile
     container_name: upstream-mediamtx
     restart: unless-stopped
+    # --- M9.1 resource fences (docs/design/03-isolation-and-blast-radius.md §3)
+    # cpus/mem_limit are CEILINGS, not reservations. Defaults are sized so a
+    # dev laptop is safe; production overrides via .env / host env:
+    #   UPSTREAM_MEDIAMTX_CPUS=6.0       prod 8-vCPU node uses 6.0 — a
+    #                                    ceiling, not a reservation (doc 03 §3)
+    #   UPSTREAM_MEDIAMTX_MEM_LIMIT=12g  prod 16 GB node uses 12g
+    cpus: "${UPSTREAM_MEDIAMTX_CPUS:-2.0}"
+    mem_limit: "${UPSTREAM_MEDIAMTX_MEM_LIMIT:-2g}"
+    # Fork-bomb fence: until hookd (M11.1) every publisher connect/disconnect
+    # forks bash+curl+ffprobe+jq under THIS container's cgroup. Deliberately
+    # not parameterized — the fence must not be relaxable by an unset env.
+    pids_limit: 1024
+    # Reader FDs (doc 03 §3).
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Docker log rotation (docs/design/01-observability.md §4): a chatty node
+    # (hook JSON lines + MediaMTX logs) must not fill its own disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
     # MediaMTX's authHTTP (and the M4 lifecycle hooks) need to reach
     # upstream-api-server. In local dev that's typically a host-side
     # process at host.docker.internal:8000. Docker Desktop on macOS /
@@ -38,9 +79,22 @@ services:
       # WebRTC ICE/media (UDP). MediaMTX advertises this for peer media.
       - "8189:8189/udp"
       # MediaMTX HTTP API. Used locally for `curl localhost:9997/v3/paths/list`.
-      # TODO (production): do NOT expose 9997 publicly. Bind to 127.0.0.1 or
-      # disable in mediamtx.yml.
-      - "9997:9997/tcp"
+      # M9.1 (docs/design/05-security-hardening.md §3): host-binds 127.0.0.1
+      # by default — resolves the long-standing "do NOT expose 9997 publicly"
+      # TODO. Production sets UPSTREAM_MEDIAMTX_API_BIND=0.0.0.0 and relies on
+      # scripts/firewall-restrict-readports.sh to allow-list the api-server
+      # egress IP only.
+      - "${UPSTREAM_MEDIAMTX_API_BIND:-127.0.0.1}:9997:9997/tcp"
+      # MediaMTX Prometheus metrics (M9.2, docs/design/01-observability.md §2,
+      # ledger LG-1; enabled in mediamtx/mediamtx.yml). Host-published as
+      # 19998 (container 9998) per the 1xxxx host-port convention and the
+      # docs/design/05 §3 port table — upstream-monitoring's Prometheus
+      # scrapes ingest.upstreamcv.com:19998 (FU-14). Same bind pattern as
+      # :9997: localhost by default (local scrape: 127.0.0.1:19998);
+      # production sets UPSTREAM_MEDIAMTX_METRICS_BIND=0.0.0.0 and firewalls
+      # 19998 to the monitoring box IP only via
+      # scripts/firewall-restrict-readports.sh (MONITORING_IP env).
+      - "${UPSTREAM_MEDIAMTX_METRICS_BIND:-127.0.0.1}:19998:9998/tcp"
     volumes:
       - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
       # M4 hook scripts mounted read-only. MediaMTX execs `/hooks/on_ready.sh`

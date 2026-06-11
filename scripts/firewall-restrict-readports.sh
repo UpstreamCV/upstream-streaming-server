@@ -12,6 +12,11 @@
 #   8889  WHEP/WebRTC signaling   (host-published as 18889)
 #   8554  RTSP                    (host-published as 18554)
 #   9997  MediaMTX HTTP API       (host-published as 19997)
+#   9998  MediaMTX Prometheus metrics (host-published as 19998, M9.2) —
+#         SEPARATE allow-list from the read ports above: loopback plus
+#         the monitoring box IP (MONITORING_IP env) only, NOT the AWS
+#         api-server. When MONITORING_IP is unset the port is blocked
+#         for every non-loopback source (fail-closed default).
 #
 # What's left public on purpose:
 #   8890/udp  SRT ingest          (agents publish from anywhere)
@@ -22,8 +27,9 @@
 # traffic. DOCKER-USER is the documented hook docker provides for
 # user rules to run before its own FORWARD entries. Packets that hit
 # DOCKER-USER have already been DNAT'd to the container's address
-# space, so port matches use the container-side ports (8889/8554/9997),
-# not the host-published ports (18889/18554/19997).
+# space, so port matches use the container-side ports
+# (8889/8554/9997/9998), not the host-published ports
+# (18889/18554/19997/19998).
 #
 # Idempotent: re-running this script removes any previously installed
 # copies of its own rules before adding the new set. Rules are tagged
@@ -42,6 +48,9 @@
 #   sudo bash scripts/firewall-restrict-readports.sh --persist       # apply + save across reboot
 #   sudo bash scripts/firewall-restrict-readports.sh --remove        # undo
 #   AWS_API_SERVER_IP=1.2.3.4 sudo bash scripts/firewall-restrict-readports.sh
+#   MONITORING_IP=5.6.7.8 sudo bash scripts/firewall-restrict-readports.sh
+#     # ^ opens the metrics port (host 19998) to the monitoring box only;
+#     #   omit it and the metrics port stays blocked off-box.
 #
 
 set -euo pipefail
@@ -67,10 +76,24 @@ LAN_CIDR="${LAN_CIDR:-10.0.0.16/32}"
 TAILSCALE_CIDR="${TAILSCALE_CIDR:-100.64.0.0/10}"
 DOCKER_CIDR="${DOCKER_CIDR:-172.16.0.0/12}"
 
+# Monitoring box IP allowed to scrape the MediaMTX Prometheus metrics
+# port (M9.2, docs/design/05-security-hardening.md §3 / FU-14). This is
+# a SEPARATE allow-list from AWS_API_SERVER_IP on purpose: the
+# api-server has no business reading metrics, and the monitoring box
+# has no business reaching the read/API ports. Deliberately NO default
+# — when unset, no monitoring allow rule is installed and the metrics
+# port is blocked for every non-loopback source (fail-closed).
+MONITORING_IP="${MONITORING_IP:-}"
+
 # Container-side TCP ports to lock. Docker DNATs the host-published
 # 18889/18554/19997 to these before DOCKER-USER is evaluated, so this
 # is the right port set to match on.
 TCP_PORTS_CSV="8889,8554,9997"
+
+# Container-side metrics port (host-published as 19998). Kept out of
+# TCP_PORTS_CSV because its allow-list (loopback + MONITORING_IP) is
+# different from the read ports' (loopback/LAN/tailscale/docker/AWS).
+METRICS_PORT="9998"
 
 # Tag we attach to every rule we own so --remove can find them and
 # --apply can dedupe a re-run.
@@ -137,12 +160,45 @@ apply_rules() {
     -s 127.0.0.0/8 \
     -m comment --comment "$TAG: allow loopback" -j RETURN
 
-  # IPv6: the AWS api-server reaches us via an IPv4 Elastic IP, and the
-  # browser ICE path is UDP only — there is no legitimate inbound v6
-  # TCP for these ports today. Drop unconditionally; revisit if a v6
-  # source is ever introduced.
+  # --- Metrics port (container 9998, host-published 19998; M9.2) ----------
+  # Same bottom-up insertion trick as above; desired evaluation order:
+  #
+  #     1. loopback        RETURN  (local scrape: 127.0.0.1:19998)
+  #     2. monitoring box  RETURN  (only when MONITORING_IP is set)
+  #     3. (catch-all)     DROP
+  #
+  # Deliberately NOT in TCP_PORTS_CSV: the metrics allow-list is the
+  # monitoring box only — no LAN/tailscale/docker/api-server holes. The
+  # DROP is installed unconditionally, so an unset MONITORING_IP leaves
+  # the port blocked for every non-loopback source (fail-closed).
+
+  iptables -I DOCKER-USER -p tcp --dport "$METRICS_PORT" \
+    -m comment --comment "$TAG: drop unauthorized metrics access" -j DROP
+
+  if [[ -n "$MONITORING_IP" ]]; then
+    iptables -I DOCKER-USER -p tcp --dport "$METRICS_PORT" \
+      -s "$MONITORING_IP" \
+      -m comment --comment "$TAG: allow monitoring box (metrics)" -j RETURN
+  else
+    echo "note: MONITORING_IP is unset — metrics port ${METRICS_PORT} (host 19998)"
+    echo "      is blocked for all non-loopback sources. Set MONITORING_IP=<ip>"
+    echo "      and re-run to allow the monitoring box to scrape it."
+  fi
+
+  iptables -I DOCKER-USER -p tcp --dport "$METRICS_PORT" \
+    -s 127.0.0.0/8 \
+    -m comment --comment "$TAG: allow loopback (metrics)" -j RETURN
+
+  # IPv6: the AWS api-server reaches us via an IPv4 Elastic IP, the
+  # browser ICE path is UDP only, and the monitoring box scrapes over
+  # IPv4 — there is no legitimate inbound v6 TCP for any of these ports
+  # today. Drop unconditionally; revisit if a v6 source is ever
+  # introduced.
   ip6tables -I DOCKER-USER -p tcp -m multiport --dports "$TCP_PORTS_CSV" \
     -m comment --comment "$TAG: drop all v6" -j DROP
+
+  ip6tables -I DOCKER-USER -p tcp --dport "$METRICS_PORT" \
+    -m comment --comment "$TAG: drop all v6 (metrics)" -j DROP
 }
 
 show_rules() {
@@ -203,10 +259,19 @@ verification — from any non-allowed public host (laptop on cellular, etc.):
 
 verification — from this host (loopback):
   curl -fsS http://localhost:19997/v3/paths/list  # expect: 200 OK
+  curl -fsS http://localhost:19998/metrics        # expect: 200 OK
+
+verification — metrics port, from the monitoring box (requires MONITORING_IP
+set to that box's IP when this script was applied):
+  curl -fsS -m 5 http://ingest.upstreamcv.com:19998/metrics  # expect: 200 OK
+
+verification — metrics port, from any other host (or any host at all when
+MONITORING_IP was unset):
+  curl -m 5 http://ingest.upstreamcv.com:19998/metrics  # expect: timeout
 POST
     ;;
   -h|--help)
-    sed -n '2,50p' "$0"
+    sed -n '2,54p' "$0"
     ;;
   *)
     echo "unknown mode: $mode" >&2

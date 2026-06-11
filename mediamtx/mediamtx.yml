@@ -25,11 +25,27 @@ logDestinations: [stdout]
 # Enables GET /v3/paths/list and friends. Used by humans during local
 # debugging (e.g. `curl localhost:9997/v3/paths/list`).
 #
-# TODO (production): leave `api: yes` but bind `apiAddress` to 127.0.0.1 so
-# it is not reachable off-box. In M1 we expose 9997 in docker-compose.yml
-# for convenience; do not do that in prod.
+# Exposure (resolved M9.1, docs/design/05-security-hardening.md §3):
+# `apiAddress` stays `:9997` in-container (the api-server provisions paths
+# through it), but docker-compose.yml now host-binds it to 127.0.0.1 by
+# default (UPSTREAM_MEDIAMTX_API_BIND). Production opens it and allow-lists
+# the api-server egress IP via scripts/firewall-restrict-readports.sh.
 api: yes
 apiAddress: :9997
+
+###############################################################################
+# Metrics (M9.2)
+###############################################################################
+
+# Prometheus metrics endpoint (docs/design/01-observability.md §2, ledger
+# LG-1): paths/ready paths, per-path bytes, SRT conn stats. Scraped by
+# Prometheus on the monitoring box. docker-compose.yml host-binds 9998 to
+# 127.0.0.1 by default (UPSTREAM_MEDIAMTX_METRICS_BIND); prod firewalls it
+# to the monitoring box IP only (docs/design/05 §3). The `metrics` action
+# is already in authHTTPExclude below, so enabling this adds no authHTTP
+# round-trips.
+metrics: yes
+metricsAddress: :9998
 
 ###############################################################################
 # Auth (M4.1: SRT publish gated via api-server authHTTP)
@@ -41,9 +57,14 @@ apiAddress: :9997
 # M4 scope is publish authorization only; reader auth is a later
 # milestone, and the local debug HTTP API on :9997 must stay reachable.
 #
-# The shared secret rides in the URL path segment because MediaMTX 1.9.3
-# has no `authHTTPHeaders` (added upstream in 1.11+). The URL itself is
-# NOT written to this file — MediaMTX 1.9.3 does not expand ${VAR}
+# The shared secret rides in the URL path segment because MediaMTX's
+# authHTTP request has a fixed JSON body and no custom-header mechanism
+# in ANY released version — the M9.0 spike verified `authHTTPHeaders`
+# does not exist anywhere (checked through v1.19.1; the earlier "added
+# upstream in 1.11+" claim was wrong). Mitigations: the api-server
+# redacts the secret from its access logs (already implemented there)
+# and production reverse-proxies scrub it too (note below). The URL
+# itself is NOT written to this file — MediaMTX 1.9.3 does not expand ${VAR}
 # references inside YAML, so docker-compose.yml composes the final URL
 # from $UPSTREAM_API_BASE_URL and $UPSTREAM_MEDIAMTX_WEBHOOK_SECRET and
 # passes it in as MTX_AUTHHTTPADDRESS, which MediaMTX picks up as the

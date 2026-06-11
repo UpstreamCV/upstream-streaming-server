@@ -34,6 +34,17 @@
 # structured warning and exits 0. The M4 path's `stream-started`
 # success is authoritative for the session.
 #
+# M9.2 telemetry (docs/design/01-observability.md §4): each phase
+# boundary additionally emits ONE JSON event line to stdout via
+# scripts/hooks/_log.sh `emit_evt` (phases: lookup, ffprobe,
+# stream_started, expected_fetch, compare, report OR validation_failed,
+# snapshotter_spawn). Additive only — every pre-existing stderr log
+# line, the routing, and all exit codes are unchanged; emit_evt never
+# fails this hook and never logs URLs/tokens/secrets. HTTP phases
+# capture the real status code via `-w '%{http_code}'` (doc 01 §4 shows
+# e.g. status 201) while keeping curl's `-f` exit semantics; a
+# non-numeric capture (connect failure etc.) coerces to 0.
+#
 # Required env (set by docker-compose):
 #   - UPSTREAM_API_BASE_URL              e.g. https://api.upstreamcv.com
 #   - UPSTREAM_MEDIAMTX_WEBHOOK_SECRET   shared with the api-server
@@ -62,28 +73,50 @@ fi
 : "${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET:?UPSTREAM_MEDIAMTX_WEBHOOK_SECRET is required}"
 : "${MTX_PATH:?MTX_PATH is not set — is this script being run by MediaMTX?}"
 
+# M9.2 hook telemetry (docs/design/01-observability.md §4): one additive
+# JSON line per phase to stdout; existing stderr log lines are unchanged.
+# Defensive on purpose — a missing/broken _log.sh must never change this
+# hook's behavior, so the source is guarded and no-op fallbacks are
+# defined. emit_evt itself never fails (see _log.sh contract).
+# shellcheck disable=SC1091
+. "$(dirname "$0")/_log.sh" 2>/dev/null || true
+declare -F emit_evt >/dev/null 2>&1 || emit_evt() { return 0; }
+declare -F evt_now_ms >/dev/null 2>&1 || evt_now_ms() { printf '0'; return 0; }
+
 STREAMID="publish:${MTX_PATH}"
 
 # --- 1. Resolve session_id ---------------------------------------------------
 
-lookup_resp=$(
-  curl -fsS --max-time 5 \
+# Same capture pattern as on_not_ready.sh step 1: body to a temp file,
+# HTTP code via -w. `-f` is kept, so curl still exits non-zero on any
+# HTTP >= 400 and the failure branch is byte-identical in behavior —
+# only the status passed to emit_evt changes (real code; non-numeric
+# captures coerce to 0).
+evt_t0=$(evt_now_ms)
+lookup_status=$(
+  curl -fsS --max-time 5 -o /tmp/on-ready-lookup.$$ -w '%{http_code}' \
     -H "Content-Type: application/json" \
     -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
     -d "$(jq -nc --arg s "$STREAMID" '{streamid:$s}')" \
     "${UPSTREAM_API_BASE_URL%/}/v1/ingest/lookup-session"
 ) || {
+  [[ "$lookup_status" =~ ^[0-9]+$ ]] || lookup_status=0
+  emit_evt on_ready lookup fail "$lookup_status" "$evt_t0"
   log "lookup-session failed for streamid=${STREAMID}"
+  rm -f /tmp/on-ready-lookup.$$
   exit 1
 }
 
-session_id=$(printf '%s' "$lookup_resp" | jq -er '.session_id')
+session_id=$(jq -er '.session_id' </tmp/on-ready-lookup.$$)
+rm -f /tmp/on-ready-lookup.$$
 log "resolved session_id=${session_id}"
+emit_evt on_ready lookup ok "$lookup_status" "$evt_t0"
 
 # --- 2. ffprobe the local re-stream -----------------------------------------
 
 probe_url="rtsp://127.0.0.1:8554/${MTX_PATH}"
 probe=""
+evt_t0=$(evt_now_ms)
 for attempt in 1 2 3; do
   if probe=$(
     ffprobe -v error -timeout 2000000 \
@@ -104,9 +137,11 @@ for attempt in 1 2 3; do
 done
 
 if [[ -z "$probe" ]]; then
+  emit_evt on_ready ffprobe fail 0 "$evt_t0"
   log "ffprobe failed after 3 attempts; cannot send stream-started"
   exit 1
 fi
+emit_evt on_ready ffprobe ok 0 "$evt_t0"
 
 # --- 3. Build observed payload ----------------------------------------------
 
@@ -143,17 +178,22 @@ payload=$(
     '{session_id:$sid, observed:$obs, started_at:$started}'
 )
 
-curl -fsS --max-time 5 \
-  -H "Content-Type: application/json" \
-  -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
-  -d "$payload" \
-  "${UPSTREAM_API_BASE_URL%/}/v1/ingest/stream-started" \
-  >/dev/null || {
-    log "stream-started POST failed for session_id=${session_id}"
-    exit 1
-  }
+evt_t0=$(evt_now_ms)
+started_status=$(
+  curl -fsS --max-time 5 -o /dev/null -w '%{http_code}' \
+    -H "Content-Type: application/json" \
+    -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
+    -d "$payload" \
+    "${UPSTREAM_API_BASE_URL%/}/v1/ingest/stream-started"
+) || {
+  [[ "$started_status" =~ ^[0-9]+$ ]] || started_status=0
+  emit_evt on_ready stream_started fail "$started_status" "$evt_t0"
+  log "stream-started POST failed for session_id=${session_id}"
+  exit 1
+}
 
 log "stream-started ok"
+emit_evt on_ready stream_started ok "$started_status" "$evt_t0"
 
 # --- 5. M5.1 — fetch expected config (best-effort) ---------------------------
 #
@@ -161,26 +201,39 @@ log "stream-started ok"
 # hook to exit non-zero — the M4 lifecycle has already succeeded by the
 # time we get here.
 
-expected_resp=$(
-  curl -fsS --max-time 5 \
+# Body to a temp file + HTTP code via -w (same pattern as step 1).
+# expected_resp stays "" on curl failure, so the decision branches below
+# are unchanged — only the emit_evt status arguments carry the real code.
+evt_t0=$(evt_now_ms)
+expected_resp=""
+if expected_status=$(
+  curl -fsS --max-time 5 -o /tmp/on-ready-expected.$$ -w '%{http_code}' \
     -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
     "${UPSTREAM_API_BASE_URL%/}/v1/ingest/expected/${session_id}" 2>/dev/null
-) || expected_resp=""
+); then
+  expected_resp=$(cat /tmp/on-ready-expected.$$ 2>/dev/null) || expected_resp=""
+fi
+rm -f /tmp/on-ready-expected.$$
+[[ "$expected_status" =~ ^[0-9]+$ ]] || expected_status=0
 
 if [[ -z "$expected_resp" ]]; then
+  emit_evt on_ready expected_fetch fail "$expected_status" "$evt_t0"
   log "validation_expected_lookup_failed session_id=${session_id}"
   exit 0
 fi
 
 expected=$(printf '%s' "$expected_resp" | jq -c '.expected') || expected=""
 if [[ -z "$expected" ]]; then
+  emit_evt on_ready expected_fetch fail "$expected_status" "$evt_t0"
   log "validation_expected_payload_invalid session_id=${session_id}"
   exit 0
 fi
+emit_evt on_ready expected_fetch ok "$expected_status" "$evt_t0"
 
 # --- 6. M5.1 — run comparator ----------------------------------------------
 
 compare_script="$(dirname "$0")/_compare.sh"
+evt_t0=$(evt_now_ms)
 verdict=$(
   bash "$compare_script" \
     <(printf '%s' "$observed") \
@@ -188,9 +241,11 @@ verdict=$(
 ) || verdict=""
 
 if [[ -z "$verdict" ]]; then
+  emit_evt on_ready compare fail 0 "$evt_t0"
   log "validation_comparator_failed session_id=${session_id}"
   exit 0
 fi
+emit_evt on_ready compare ok 0 "$evt_t0"
 
 # --- 7. Extract verdict fields ----------------------------------------------
 
@@ -231,15 +286,20 @@ if [[ "$passed" != "true" && "$enforcement" == "true" ]]; then
       '{session_id:$sid, observed:$obs, mismatch_fields:$mm, failure_code:$fc, failure_message:$fm}'
   )
 
-  if curl -fsS --max-time 5 \
+  evt_t0=$(evt_now_ms)
+  if vf_status=$(
+    curl -fsS --max-time 5 -o /dev/null -w '%{http_code}' \
       -H "Content-Type: application/json" \
       -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
       -d "$failed_payload" \
-      "${UPSTREAM_API_BASE_URL%/}/v1/ingest/validation-failed" \
-      >/dev/null; then
+      "${UPSTREAM_API_BASE_URL%/}/v1/ingest/validation-failed"
+  ); then
     log "validation_failed_post_ok session_id=${session_id}"
+    emit_evt on_ready validation_failed ok "$vf_status" "$evt_t0"
   else
+    [[ "$vf_status" =~ ^[0-9]+$ ]] || vf_status=0
     log "validation_failed_post_failed session_id=${session_id}"
+    emit_evt on_ready validation_failed fail "$vf_status" "$evt_t0"
   fi
 
   # Structured one-line summary. Logs only redacted-friendly fields —
@@ -267,15 +327,20 @@ report_payload=$(
     '{session_id:$sid, passed:$p, observed:$obs, expected:$exp, mismatch_fields:$mm}'
 )
 
-curl -fsS --max-time 5 \
-  -H "Content-Type: application/json" \
-  -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
-  -d "$report_payload" \
-  "${UPSTREAM_API_BASE_URL%/}/v1/ingest/stream-validations" \
-  >/dev/null || {
-    log "validation_report_post_failed session_id=${session_id}"
-    exit 0
-  }
+evt_t0=$(evt_now_ms)
+report_status=$(
+  curl -fsS --max-time 5 -o /dev/null -w '%{http_code}' \
+    -H "Content-Type: application/json" \
+    -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
+    -d "$report_payload" \
+    "${UPSTREAM_API_BASE_URL%/}/v1/ingest/stream-validations"
+) || {
+  [[ "$report_status" =~ ^[0-9]+$ ]] || report_status=0
+  emit_evt on_ready report fail "$report_status" "$evt_t0"
+  log "validation_report_post_failed session_id=${session_id}"
+  exit 0
+}
+emit_evt on_ready report ok "$report_status" "$evt_t0"
 
 # Structured one-line summary. Logs only the redacted-friendly fields —
 # never $observed verbatim (it is small and non-secret, but keeping the
@@ -337,6 +402,7 @@ if [[ "$passed" == "true" \
       && "$snapshotter_enabled" == "true" \
       && -n "${MTX_PATH:-}" \
       && -x "$snapshotter_script" ]]; then
+  evt_t0=$(evt_now_ms)
   snap_log="${UPSTREAM_SNAPSHOT_DIR:-/snapshots}/.runtime/${MTX_PATH}.snapshotter.log"
   mkdir -p "$(dirname "$snap_log")" 2>/dev/null || true
 
@@ -347,6 +413,7 @@ if [[ "$passed" == "true" \
   fi
   disown 2>/dev/null || true
   log "snapshotter_started session_id=${session_id}"
+  emit_evt on_ready snapshotter_spawn ok 0 "$evt_t0"
 elif [[ "$passed" == "true" && "$snapshotter_enabled" != "true" ]]; then
   log "snapshotter_disabled session_id=${session_id}"
 fi

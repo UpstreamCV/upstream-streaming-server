@@ -1,0 +1,60 @@
+# CI-0 (docs/design/07-roadmap.md Phase A; plan in docs/design/06 §7):
+# T0 hermetic suites + shell syntax checks + compose validation on every
+# push and PR. No network, no real MediaMTX, no api-server — the suites
+# stub ffprobe/ffmpeg and run a local mock ingest server.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  t0:
+    name: T0 hermetic suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Syntax-check all shell scripts (bash -n)
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r -d '' f; do
+            found=1
+            bash -n "$f"
+            echo "bash -n ok: $f"
+          done < <(find scripts -type f -name '*.sh' -print0 | sort -z)
+          # Guard against a refactor silently moving the scripts out of
+          # the globbed location and turning this step into a no-op.
+          [ "$found" -eq 1 ]
+
+      - name: T0 — comparator fixtures
+        run: bash scripts/dev/test_compare.sh
+
+      - name: T0 — on_ready routing (M5.1/M5.2)
+        run: bash scripts/dev/test_on_ready_routing.sh
+
+      - name: T0 — snapshotter local extraction (M6.1A)
+        run: bash scripts/dev/test_snapshotter_local.sh
+
+      - name: T0 — snapshotter upload (M6.1B)
+        run: bash scripts/dev/test_snapshotter_upload.sh
+
+  compose-validate:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml
+        run: |
+          set -euo pipefail
+          # compose interpolates UPSTREAM_* envs; the example file provides
+          # placeholder (non-secret) values for the required ones.
+          cp .env.example .env
+          docker compose config -q

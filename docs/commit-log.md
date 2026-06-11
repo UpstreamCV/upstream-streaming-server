@@ -171,6 +171,12 @@ note, metric names, v1.19.1 target).
 
 ## 2026-06-11 — M9.1/M9.2 fragments + CI-0: compose fences, MediaMTX metrics, hook JSON telemetry, GitHub Actions T0
 
+**Landed:** as the code commit immediately following the docs-set
+commit (the entries below dated 2026-06-10/11 landed together in that
+docs commit; this note is the commit-log touch for the code commit,
+which also carries the compose-header correction described in the
+FU-4 closeout entry).
+
 **Type:** hardening + observability + CI. Implements the
 "quick win" fragments of M9.1 (compose resource fences, `:9997`
 scoping, docker log rotation — docs/design/03 §3 + 05 §3) and M9.2
