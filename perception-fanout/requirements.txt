@@ -1,0 +1,5 @@
+# perception-fanout runtime dependencies. Pinned; review before bumping —
+# the WS close-code and TestClient behaviors this service relies on are
+# exercised by tests/test_fanout.py, so run pytest after any bump.
+fastapi==0.115.12
+uvicorn[standard]==0.34.0

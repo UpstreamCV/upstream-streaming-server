@@ -122,6 +122,19 @@ ships): a cron-driven textfile-collector that greps the container log
 for `"outcome":"fail"` counts — explicitly marked interim and deleted
 with hookd's arrival.
 
+The **perception-fanout sidecar** (`docs/perception-fanout.md`) emits
+the same one-JSON-line-per-event shape to stdout, under the `fanout.*`
+namespace: `fanout.startup`, `fanout.publisher_connected/disconnected`
+(`transport`), `fanout.snapshot_received` (`camera_id`, `seq`,
+`subscribers` — sampled every 50th frame per camera; at 15 Hz an
+unsampled line per frame is log spam), `fanout.subscriber_connected/`
+`disconnected` (`camera_id`, `account_id`, `count`[, `reason`]), and
+`fanout.auth_rejected` (`role`, `reason`). Same no-secrets rule —
+additionally, because subscriber tokens ride the WS query string, the
+sidecar runs uvicorn with `--no-access-log` and installs a `token=…`
+redaction filter on the uvicorn/websockets loggers; the e2e suite
+(`scripts/dev/test_perception_fanout.sh`) greps for leaks.
+
 ## 5. SLI / SLO table
 
 Initial SLOs are **report-only targets** — they exist to be measured

@@ -28,6 +28,25 @@ The streaming server never decides *whether* a stream is allowed in isolation �
 the API server makes that call. The streaming server's job is to enforce the
 decision the API server already made.
 
+## perception-fanout sidecar (detection-overlay hot path)
+
+Alongside MediaMTX, `docker-compose.yml` runs a second container:
+`perception-fanout` (`perception-fanout/`, Python FastAPI). It is NOT on
+the video path — it relays the processor's perception snapshots
+(bounding boxes, geometry) to browser WebSocket subscribers at 10–15 Hz,
+bypassing the api-server/DB path whose write→WAL→Realtime trip caps the
+dashboard's live overlay at ~1–3 fps. The processor's ~1 Hz POST to the
+api-server is unchanged and remains the durable record + dashboard
+fallback; this sidecar is purely ephemeral (in-memory, no persistence).
+
+Auth split: the api-server mints short-lived HMAC subscriber tokens
+(`POST /v1/cameras/{id}/perception/stream-token`, Supabase JWT +
+ownership checks there); the sidecar verifies signature + expiry with
+the shared `UPSTREAM_FANOUT_TOKEN_SECRET`. The processor publishes with
+the dedicated `UPSTREAM_FANOUT_PUBLISH_SECRET` header. Full wire
+contract, token algorithm, ops + deploy checklist:
+`docs/perception-fanout.md`.
+
 ## Long-term flow (what we are building toward)
 
 ```

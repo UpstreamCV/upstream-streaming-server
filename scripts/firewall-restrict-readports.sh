@@ -17,6 +17,14 @@
 #         the monitoring box IP (MONITORING_IP env) only, NOT the AWS
 #         api-server. When MONITORING_IP is unset the port is blocked
 #         for every non-loopback source (fail-closed default).
+#   8990  perception-fanout WS (host-published as 18990) — only relevant
+#         when UPSTREAM_FANOUT_BIND=0.0.0.0 AND the TLS-terminating
+#         proxy (Caddy) is NOT co-located on this host. Allow-list:
+#         loopback plus FANOUT_PROXY_IP (the off-box proxy). When
+#         FANOUT_PROXY_IP is unset the port is blocked for every
+#         non-loopback source (fail-closed) — correct for both the
+#         co-located-Caddy shape (loopback is all it needs) and the
+#         default 127.0.0.1 bind (rules are then moot anyway).
 #
 # What's left public on purpose:
 #   8890/udp  SRT ingest          (agents publish from anywhere)
@@ -85,6 +93,13 @@ DOCKER_CIDR="${DOCKER_CIDR:-172.16.0.0/12}"
 # port is blocked for every non-loopback source (fail-closed).
 MONITORING_IP="${MONITORING_IP:-}"
 
+# Off-box TLS-terminating proxy IP allowed to reach the perception-fanout
+# WS port (container 8990, host-published 18990). Same fail-closed
+# posture as MONITORING_IP: deliberately NO default — when unset, only
+# loopback can reach the port. Irrelevant while UPSTREAM_FANOUT_BIND
+# stays at its 127.0.0.1 default or Caddy is co-located on this host.
+FANOUT_PROXY_IP="${FANOUT_PROXY_IP:-}"
+
 # Container-side TCP ports to lock. Docker DNATs the host-published
 # 18889/18554/19997 to these before DOCKER-USER is evaluated, so this
 # is the right port set to match on.
@@ -94,6 +109,10 @@ TCP_PORTS_CSV="8889,8554,9997"
 # TCP_PORTS_CSV because its allow-list (loopback + MONITORING_IP) is
 # different from the read ports' (loopback/LAN/tailscale/docker/AWS).
 METRICS_PORT="9998"
+
+# Container-side perception-fanout WS port (host-published as 18990).
+# Separate allow-list again: loopback + the off-box TLS proxy only.
+FANOUT_PORT="8990"
 
 # Tag we attach to every rule we own so --remove can find them and
 # --apply can dedupe a re-run.
@@ -189,6 +208,26 @@ apply_rules() {
     -s 127.0.0.0/8 \
     -m comment --comment "$TAG: allow loopback (metrics)" -j RETURN
 
+  # --- perception-fanout WS port (container 8990, host-published 18990) ----
+  # Same bottom-up insertion + fail-closed posture as the metrics port:
+  #
+  #     1. loopback        RETURN  (co-located Caddy proxies via 127.0.0.1)
+  #     2. off-box proxy   RETURN  (only when FANOUT_PROXY_IP is set)
+  #     3. (catch-all)     DROP
+
+  iptables -I DOCKER-USER -p tcp --dport "$FANOUT_PORT" \
+    -m comment --comment "$TAG: drop unauthorized fanout access" -j DROP
+
+  if [[ -n "$FANOUT_PROXY_IP" ]]; then
+    iptables -I DOCKER-USER -p tcp --dport "$FANOUT_PORT" \
+      -s "$FANOUT_PROXY_IP" \
+      -m comment --comment "$TAG: allow TLS proxy (fanout)" -j RETURN
+  fi
+
+  iptables -I DOCKER-USER -p tcp --dport "$FANOUT_PORT" \
+    -s 127.0.0.0/8 \
+    -m comment --comment "$TAG: allow loopback (fanout)" -j RETURN
+
   # IPv6: the AWS api-server reaches us via an IPv4 Elastic IP, the
   # browser ICE path is UDP only, and the monitoring box scrapes over
   # IPv4 — there is no legitimate inbound v6 TCP for any of these ports
@@ -199,6 +238,9 @@ apply_rules() {
 
   ip6tables -I DOCKER-USER -p tcp --dport "$METRICS_PORT" \
     -m comment --comment "$TAG: drop all v6 (metrics)" -j DROP
+
+  ip6tables -I DOCKER-USER -p tcp --dport "$FANOUT_PORT" \
+    -m comment --comment "$TAG: drop all v6 (fanout)" -j DROP
 }
 
 show_rules() {

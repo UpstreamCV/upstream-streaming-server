@@ -4,6 +4,71 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-06-11 — perception-fanout sidecar: 10–15 Hz detection-overlay hot path
+
+**Why:** the dashboard's live bounding-box overlay was capped at ~1–3
+fps because every detection frame rode the durable path (processor →
+api-server POST → Supabase upsert → WAL → Realtime/poll). Detections at
+15 Hz are stale 66 ms later — they don't belong on Postgres. New design
+split: an ephemeral in-memory WS fan-out here (hot path), with the
+existing ~1 Hz DB path untouched as the durable record and the
+dashboard's automatic fallback.
+
+**What changed (this repo):**
+- New `perception-fanout/` FastAPI container (python:3.12-slim,
+  non-root, pinned deps): `WS+POST /v1/publish` (processor side,
+  `X-Upstream-Webhook-Secret` with the new dedicated
+  `UPSTREAM_FANOUT_PUBLISH_SECRET`), `WS /v1/subscribe?token=` (browser
+  side, short-lived `upt1` HMAC tokens minted by the api-server,
+  verified here with the shared `UPSTREAM_FANOUT_TOKEN_SECRET`),
+  `GET /healthz`. Per-camera last-frame cache + monotonic `seq`;
+  per-subscriber depth-1 latest-wins mailboxes (slow clients drop
+  intermediate frames — `seq` gaps — instead of growing server queues);
+  `subscribers` count notifications so the processor can throttle to
+  ~0 Hz when nobody is watching; token-expiry `bye` + close 1000;
+  close codes 4401/1008/1009/1013. Fail-loud startup when either
+  secret is missing.
+- **Token-leak hardening (found by the e2e, case 8):** subscriber
+  tokens ride the WS query string, and uvicorn logs the handshake URL
+  through more than the access log (`uvicorn.error` INFO logs
+  `"WebSocket /v1/subscribe?token=…" [accepted]`). The container runs
+  `--no-access-log` AND installs a `token=…` redaction filter on the
+  uvicorn/websockets loggers (`app/events.py`); both pytest and the
+  bash e2e pin this.
+- `docker-compose.yml`: new `perception-fanout` service — M9.1-style
+  fences (`UPSTREAM_FANOUT_CPUS` 0.5 / `UPSTREAM_FANOUT_MEM_LIMIT`
+  256m / pids 64), json-file rotation, host port
+  `${UPSTREAM_FANOUT_BIND:-127.0.0.1}:18990:8990/tcp` (1xxxx +
+  localhost-by-default convention; prod = co-located Caddy terminating
+  `wss://…/perception/*` → loopback).
+- `scripts/firewall-restrict-readports.sh`: fail-closed rules for 8990
+  (loopback + optional `FANOUT_PROXY_IP` for an off-box TLS proxy).
+- `scripts/dev/perception_publisher.py`: reference publisher (the
+  executable contract for the external processor team) — synthetic
+  sin/cos moving boxes or `--replay` of demo-CV detections, `--hz`,
+  WS mode (PEP 723 `websockets`) or stdlib-only `--http`.
+- Tests: `perception-fanout/tests/test_fanout.py` (37 hermetic pytest
+  cases, in-process TestClient, no ports) +
+  `scripts/dev/test_perception_fanout.sh` (wire-level e2e: real
+  uvicorn on an ephemeral port; publish auth, hello+cached-frame,
+  increasing `seq`, count 0→1→0, 4401, secret/token log grep). CI:
+  new `perception-fanout` job in `.github/workflows/ci.yml`.
+
+**Cross-repo (same feature, see their commit logs):** api-server mints
+the subscriber token (`POST /v1/cameras/{id}/perception/stream-token`,
+503 `perception_stream_not_configured` when unset) and holds
+`UPSTREAM_FANOUT_TOKEN_SECRET` + `UPSTREAM_FANOUT_PUBLIC_WS_URL`;
+dashboard adds the WS client + overlay integration (poll downshifts
+250 ms → 2 s while frames flow; full fallback to Realtime/polling when
+the sidecar is absent).
+
+**Docs:** new `docs/perception-fanout.md` (contract, token algorithm,
+ops/deploy checklist incl. the Caddy wss route being deployment-level);
+updated `docs/architecture.md`, `docs/module-map.md`, `README.md`,
+`.env.example`, `docs/design/05-security-hardening.md` (port table +
+8990/18990), `docs/design/01-observability.md` (`fanout.*` events +
+redaction note).
+
 ## 2026-06-11 — Docs: M9.0 MediaMTX capability spike results (ledger filled) + design-doc corrections
 
 **Type:** docs-only. No code, runtime, config-behavior, or contract

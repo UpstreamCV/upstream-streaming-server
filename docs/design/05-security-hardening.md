@@ -65,6 +65,7 @@ column:
 | 8889 | 18889 | TCP | WebRTC signaling | api-server egress IP |
 | 9997 | 19997 | TCP | MediaMTX API | api-server egress IP **only** — the api-server is already remote and the allow-list already exists in `firewall-restrict-readports.sh`; multi-node just templates it per node |
 | 9998 | 19998 | TCP | MediaMTX metrics | monitoring box IP only |
+| 8990 | 18990 | TCP | perception-fanout WS (`docs/perception-fanout.md`) | loopback only by default (co-located Caddy terminates `wss://…/perception/*`); off-box TLS proxy via `FANOUT_PROXY_IP` allow-list in `firewall-restrict-readports.sh` (fail-closed when unset) |
 | 9100/9101/9102 | (direct) | TCP | node_exporter / hookd / snapshotd metrics | monitoring box IP only |
 
 **Multi-node end-state, noted not scheduled:** a WireGuard mesh between

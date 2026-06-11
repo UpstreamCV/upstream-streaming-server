@@ -10,6 +10,13 @@ lifecycle events back to `upstream-api-server`.
 - The **media plane**: it receives bytes and routes them.
 - A thin shell around [MediaMTX](https://github.com/bluenviron/mediamtx) plus
   glue scripts and (future) validators and webhook handlers.
+- Plus one data-plane sidecar: **perception-fanout**
+  (`perception-fanout/`), a small FastAPI container that relays the
+  processor's detection snapshots to browser WebSocket subscribers at
+  10–15 Hz so the dashboard's live overlay isn't capped by the
+  DB-backed path (~1 Hz). Ephemeral by design; the processor's POSTs to
+  the api-server stay the durable record. See
+  `docs/perception-fanout.md`.
 
 ## What this repo is NOT
 

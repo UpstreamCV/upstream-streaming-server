@@ -45,6 +45,25 @@ jobs:
       - name: T0 — snapshotter upload (M6.1B)
         run: bash scripts/dev/test_snapshotter_upload.sh
 
+  perception-fanout:
+    name: perception-fanout (pytest + e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install perception-fanout deps
+        run: pip install -r perception-fanout/requirements-dev.txt
+
+      - name: Hermetic pytest (in-process ASGI, no ports)
+        run: python -m pytest perception-fanout/tests -q
+
+      - name: Wire-level e2e (uvicorn on an ephemeral port)
+        run: bash scripts/dev/test_perception_fanout.sh
+
   compose-validate:
     name: docker compose config
     runs-on: ubuntu-latest

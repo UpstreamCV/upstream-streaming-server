@@ -10,3 +10,7 @@ snapshots/*
 recordings/
 *.log
 .DS_Store
+# perception-fanout local dev artifacts
+perception-fanout/.venv/
+__pycache__/
+.pytest_cache/
