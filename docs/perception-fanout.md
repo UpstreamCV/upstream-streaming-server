@@ -42,6 +42,20 @@ The sidecar trusts the token's `cam` claim and binds the connection to
 that camera. Revocation exposure after a membership change is bounded by
 the token TTL (api-server default 600 s).
 
+**Accepted v1 risk — publish side has NO per-camera authorization.** The
+publish secret is one org-wide credential, and the envelope's
+`camera_id` is validated as a UUID only — never against camera existence
+or tenant ownership. This is deliberately looser than the cold path
+(the api-server derives account/camera from a `stream_session` lookup
+and never trusts the body): the hot path has no DB, and the only secret
+holder is our own processor. Consequence: a leaked publish secret lets
+an attacker push fake overlay frames to ANY camera's live view across
+all accounts (ephemeral, display-only; the durable record and events
+are untouched). Mitigations today: rotate the secret (one env var on
+two boxes); future hardening options if processors multiply: per-camera
+derived secrets, or sidecar-side session validation against the
+api-server.
+
 ## Subscriber token format (`upt1`)
 
 Stdlib hmac/base64/json on both sides; no JWT dependency. The mint side

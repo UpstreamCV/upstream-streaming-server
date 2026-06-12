@@ -4,6 +4,18 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-06-11 — Docs: name the publish-side trust gap as an accepted v1 risk
+
+**Type:** docs-only. Post-deploy code review confirmed the
+perception-fanout publish side has no per-camera authorization (the
+org-wide publish secret + a UUID-format check is all that gates a
+`camera_id`), which is deliberately looser than the cold path's
+session-derived tenant model on the api-server. `docs/perception-fanout.md`
+now states the risk explicitly (leaked secret ⇒ fake overlay frames on
+any camera; ephemeral/display-only blast radius), the mitigation
+(rotate one env var on two boxes), and the future hardening options
+(per-camera derived secrets, or sidecar-side session validation).
+
 ## 2026-06-11 — Fix documented firewall-script usage: env vars go AFTER sudo
 
 **Type:** docs-only (script header comments + perception-fanout doc).
