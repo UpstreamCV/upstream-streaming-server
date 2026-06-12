@@ -47,16 +47,31 @@ declare -F evt_now_ms >/dev/null 2>&1 || evt_now_ms() { printf '0'; return 0; }
 
 STREAMID="publish:${MTX_PATH}"
 
+# Guarantee the lookup temp file is cleaned up even when a mid-step
+# abort skips the inline rms: `jq -er` failing under `set -e`, or the
+# 8s `timeout` wrapper's TERM (bash runs the EXIT trap on an untrapped
+# fatal TERM). Same pattern as on_ready.sh.
+trap 'rm -f "/tmp/lookup-resp.$$"' EXIT
+
 # --- 1. Resolve session_id (idempotent on 404) ------------------------------
 
+# Body to a temp file, HTTP code via -w. No `-f` here on purpose: a 404
+# is an expected, idempotent outcome and we want its status, not a curl
+# failure. On a transport failure curl exits non-zero AND usually still
+# prints "000" via -w itself — so we must NOT append a fallback echo
+# (`|| echo 000` would yield "000000"); instead capture curl's rc and
+# default the variable only when it is not exactly three digits, so
+# exactly one 3-digit code lands in lookup_status.
 evt_t0=$(evt_now_ms)
+lookup_rc=0
 lookup_status=$(
   curl -sS --max-time 5 -o /tmp/lookup-resp.$$ -w '%{http_code}' \
     -H "Content-Type: application/json" \
     -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
     -d "$(jq -nc --arg s "$STREAMID" '{streamid:$s}')" \
-    "${UPSTREAM_API_BASE_URL%/}/v1/ingest/lookup-session" || echo "000"
-)
+    "${UPSTREAM_API_BASE_URL%/}/v1/ingest/lookup-session"
+) || lookup_rc=$?
+[[ "$lookup_status" =~ ^[0-9]{3}$ ]] || lookup_status="000"
 
 if [[ "$lookup_status" == "404" ]]; then
   # Idempotent no-op (exit 0), so outcome=ok with the real status.
@@ -68,7 +83,7 @@ fi
 
 if [[ "$lookup_status" != "200" ]]; then
   emit_evt on_not_ready lookup fail "$lookup_status" "$evt_t0"
-  log "lookup-session unexpected status=${lookup_status} for streamid=${STREAMID}"
+  log "lookup-session unexpected status=${lookup_status} curl_rc=${lookup_rc} for streamid=${STREAMID}"
   rm -f /tmp/lookup-resp.$$
   exit 1
 fi
@@ -88,17 +103,24 @@ payload=$(
     '{session_id:$sid, ended_at:$ended, reason:"srt_closed"}'
 )
 
+# Same capture pattern as on_ready.sh's stream-started POST: body to
+# /dev/null, HTTP code via -w. `-f` is kept, so curl still exits
+# non-zero on any HTTP >= 400 and the failure branch is identical in
+# behavior — only the status passed to emit_evt changes (real code;
+# non-numeric captures coerce to 0).
 evt_t0=$(evt_now_ms)
-curl -fsS --max-time 5 \
-  -H "Content-Type: application/json" \
-  -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
-  -d "$payload" \
-  "${UPSTREAM_API_BASE_URL%/}/v1/ingest/stream-ended" \
-  >/dev/null || {
-    emit_evt on_not_ready stream_ended fail 0 "$evt_t0"
-    log "stream-ended POST failed for session_id=${session_id}"
-    exit 1
-  }
+ended_status=$(
+  curl -fsS --max-time 5 -o /dev/null -w '%{http_code}' \
+    -H "Content-Type: application/json" \
+    -H "X-Upstream-Webhook-Secret: ${UPSTREAM_MEDIAMTX_WEBHOOK_SECRET}" \
+    -d "$payload" \
+    "${UPSTREAM_API_BASE_URL%/}/v1/ingest/stream-ended"
+) || {
+  [[ "$ended_status" =~ ^[0-9]+$ ]] || ended_status=0
+  emit_evt on_not_ready stream_ended fail "$ended_status" "$evt_t0"
+  log "stream-ended POST failed for session_id=${session_id}"
+  exit 1
+}
 
 log "stream-ended ok"
-emit_evt on_not_ready stream_ended ok 0 "$evt_t0"
+emit_evt on_not_ready stream_ended ok "$ended_status" "$evt_t0"

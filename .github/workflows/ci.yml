@@ -4,9 +4,22 @@
 # stub ffprobe/ffmpeg and run a local mock ingest server.
 name: CI
 
+# push is scoped to main so an in-repo PR branch runs once (as
+# pull_request), not twice; pull_request stays unrestricted so forks
+# and any-base PRs are still covered.
 on:
   push:
+    branches: [main]
   pull_request:
+
+# Least-privilege token: every job only checks out code.
+permissions:
+  contents: read
+
+# Cancel superseded runs of the same branch/PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   t0:

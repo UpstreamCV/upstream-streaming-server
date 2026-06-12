@@ -17,6 +17,11 @@
 #   3. passed=false, enforcement off -> /stream-validations  (not /validation-failed)
 #   4. passed=false, enforcement on  -> /validation-failed   (not /stream-validations)
 #   5. passed=false, enforcement on, /validation-failed 409 -> logged, exit 0
+#   6. M9.2 telemetry, happy path: every '{'-prefixed hook-stdout line is
+#      valid JSON; no webhook secret / 'srt://' on stdout (_log.sh leak
+#      contract).
+#   7. M9.2 telemetry, failure path (API unreachable): same JSON + leak
+#      assertions on the on_ready.lookup fail event; hook exits non-zero.
 #
 # The hook must always exit 0 from the M5.x portion (best-effort: a broken
 # API/report call must never wedge MediaMTX).
@@ -207,6 +212,78 @@ assert "$(hit 'validation-failed')" "POST /v1/ingest/validation-failed (attempte
 grep -q "validation_failed_post_failed" "${WORKDIR}/stderr" \
   && assert true "logged validation_failed_post_failed on non-2xx" \
   || assert false "logged validation_failed_post_failed on non-2xx"
+
+# --- M9.2 telemetry (cases 6-7) ----------------------------------------------
+# scripts/hooks/_log.sh's contract says "the test suites' secret-leak
+# greps extend to these lines" — these cases make that true here. The
+# hook's stdout (where emit_evt writes its JSON event lines) is captured
+# instead of discarded, then asserted on:
+#   (a) every stdout line starting with '{' parses via `jq -e .`
+#   (b) NO occurrence of the webhook secret (this suite sets it, so it
+#       greps for its own value) and NO 'srt://' anywhere on stdout
+# for the happy path AND a failure path (API unreachable -> lookup fail
+# event, hook exit 1 by M4 design).
+
+# run_telemetry_case <name> <api_base> -> hook stdout in $TELEM_OUT,
+# hook rc in $TELEM_RC. Same env shape as run_case (enforce off,
+# width 1280 = passing verdict); only the API base varies.
+run_telemetry_case() {
+  local name=$1 api_base=$2
+  printf '  case: %s\n' "$name"
+  : > "$RECORD_FILE"
+  printf '%s' "200" > "${RECORD_FILE}.vfstatus"
+  TELEM_OUT="${WORKDIR}/stdout.telemetry"
+  env -i \
+    PATH="${FAKEBIN}:/usr/bin:/bin:/usr/local/bin" \
+    UPSTREAM_HOOK_TIMEOUT_WRAPPED=1 \
+    UPSTREAM_API_BASE_URL="$api_base" \
+    UPSTREAM_MEDIAMTX_WEBHOOK_SECRET="$SECRET" \
+    UPSTREAM_VALIDATION_ENFORCE=0 \
+    UPSTREAM_SNAPSHOTTER_ENABLED=0 \
+    MTX_PATH="sess_0123456789abcdef" \
+    FAKE_PROBE_WIDTH=1280 \
+    bash "$ON_READY" >"$TELEM_OUT" 2>"${WORKDIR}/stderr"
+  TELEM_RC=$?
+}
+
+# assert_telemetry_lines: (a) + (b) on $TELEM_OUT, requiring at least
+# one JSON event line so the assertions are never vacuously green.
+assert_telemetry_lines() {
+  local json_seen=0 json_ok=true line
+  while IFS= read -r line; do
+    [[ "$line" == \{* ]] || continue
+    json_seen=$((json_seen + 1))
+    printf '%s' "$line" | jq -e . >/dev/null 2>&1 || json_ok=false
+  done < "$TELEM_OUT"
+  [[ "$json_ok" == "true" && "$json_seen" -gt 0 ]] \
+    && assert true "every '{'-prefixed stdout line is valid JSON (saw ${json_seen})" \
+    || assert false "every '{'-prefixed stdout line is valid JSON (saw ${json_seen}, ok=${json_ok})"
+  grep -qF -- "$SECRET" "$TELEM_OUT" \
+    && assert false "webhook secret absent from hook stdout" \
+    || assert true "webhook secret absent from hook stdout"
+  grep -qF -- "srt://" "$TELEM_OUT" \
+    && assert false "no 'srt://' on hook stdout" \
+    || assert true "no 'srt://' on hook stdout"
+}
+
+# 6. Telemetry, happy path (passed=true, enforce off).
+run_telemetry_case "telemetry: happy path (stdout JSON + leak grep)" "$API_BASE"
+[[ "$TELEM_RC" -eq 0 ]] && assert true "hook exits 0" \
+  || assert false "hook exits 0 — got rc=$TELEM_RC"
+assert_telemetry_lines
+grep -q '"evt":"on_ready.report","path":"sess_0123456789abcdef","session_id":".*","outcome":"ok"' "$TELEM_OUT" \
+  && assert true "emitted on_ready.report ok event" \
+  || assert false "emitted on_ready.report ok event"
+
+# 7. Telemetry, failure path: unreachable API -> lookup fail event, exit 1
+#    (the M4 portion is fail-loud by design; only M5.x is best-effort).
+run_telemetry_case "telemetry: lookup failure (stdout JSON + leak grep)" "http://127.0.0.1:1"
+[[ "$TELEM_RC" -ne 0 ]] && assert true "hook exits non-zero on lookup failure (M4 fail-loud)" \
+  || assert false "hook exits non-zero on lookup failure (M4 fail-loud)"
+assert_telemetry_lines
+grep -q '"evt":"on_ready.lookup".*"outcome":"fail"' "$TELEM_OUT" \
+  && assert true "emitted on_ready.lookup fail event" \
+  || assert false "emitted on_ready.lookup fail event"
 
 echo
 echo "results: ${pass_count} passed, ${fail_count} failed"

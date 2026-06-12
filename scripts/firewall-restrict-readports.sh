@@ -193,6 +193,13 @@ apply_rules() {
   # monitoring box only — no LAN/tailscale/docker/api-server holes. The
   # DROP is installed unconditionally, so an unset MONITORING_IP leaves
   # the port blocked for every non-loopback source (fail-closed).
+  #
+  # NOTE (scope): this DROP matches on dport only, and DOCKER-USER sees
+  # forwarded container traffic in BOTH directions — so a container
+  # EGRESS connection to some external host's port 9998 would also
+  # match and be dropped. No current flow does that (containers here
+  # only talk to the api-server on 443/80); if one ever appears, scope
+  # the rule with -o/-d or a conntrack direction match.
 
   iptables -I DOCKER-USER -p tcp --dport "$METRICS_PORT" \
     -m comment --comment "$TAG: drop unauthorized metrics access" -j DROP
@@ -217,6 +224,10 @@ apply_rules() {
   #     1. loopback        RETURN  (co-located Caddy proxies via 127.0.0.1)
   #     2. off-box proxy   RETURN  (only when FANOUT_PROXY_IP is set)
   #     3. (catch-all)     DROP
+  #
+  # Same dport-only scope caveat as the metrics DROP above: container
+  # egress to an external host's port 8990 would also match this DROP;
+  # no current flow does.
 
   iptables -I DOCKER-USER -p tcp --dport "$FANOUT_PORT" \
     -m comment --comment "$TAG: drop unauthorized fanout access" -j DROP
@@ -236,6 +247,13 @@ apply_rules() {
   # IPv4 — there is no legitimate inbound v6 TCP for any of these ports
   # today. Drop unconditionally; revisit if a v6 source is ever
   # introduced.
+  #
+  # ASSUMPTION: these ip6tables inserts require the v6 DOCKER-USER
+  # chain to exist — i.e. the docker daemon runs with ip6tables support
+  # enabled (or the chain was created manually). On a host without it,
+  # each insert fails and this script aborts under `set -e` (the v4
+  # rules inserted above remain in place). The dport-only scope caveat
+  # noted on the v4 metrics/fanout DROPs applies here too.
   ip6tables -I DOCKER-USER -p tcp -m multiport --dports "$TCP_PORTS_CSV" \
     -m comment --comment "$TAG: drop all v6" -j DROP
 

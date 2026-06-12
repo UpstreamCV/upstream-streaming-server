@@ -85,6 +85,14 @@ declare -F evt_now_ms >/dev/null 2>&1 || evt_now_ms() { printf '0'; return 0; }
 
 STREAMID="publish:${MTX_PATH}"
 
+# Guarantee the curl-capture temp files (steps 1 and 5) are cleaned up
+# even when a mid-step abort skips an inline rm: `jq -er` failing under
+# `set -e`, or the 10s `timeout` wrapper's TERM (bash runs the EXIT
+# trap on an untrapped fatal TERM). The inline rms were dropped in
+# favor of this single trap; $$ is stable across the `exec timeout`
+# re-exec at the top, so the names match.
+trap 'rm -f "/tmp/on-ready-lookup.$$" "/tmp/on-ready-expected.$$"' EXIT
+
 # --- 1. Resolve session_id ---------------------------------------------------
 
 # Same capture pattern as on_not_ready.sh step 1: body to a temp file,
@@ -103,12 +111,10 @@ lookup_status=$(
   [[ "$lookup_status" =~ ^[0-9]+$ ]] || lookup_status=0
   emit_evt on_ready lookup fail "$lookup_status" "$evt_t0"
   log "lookup-session failed for streamid=${STREAMID}"
-  rm -f /tmp/on-ready-lookup.$$
   exit 1
 }
 
 session_id=$(jq -er '.session_id' </tmp/on-ready-lookup.$$)
-rm -f /tmp/on-ready-lookup.$$
 log "resolved session_id=${session_id}"
 emit_evt on_ready lookup ok "$lookup_status" "$evt_t0"
 
@@ -213,7 +219,6 @@ if expected_status=$(
 ); then
   expected_resp=$(cat /tmp/on-ready-expected.$$ 2>/dev/null) || expected_resp=""
 fi
-rm -f /tmp/on-ready-expected.$$
 [[ "$expected_status" =~ ^[0-9]+$ ]] || expected_status=0
 
 if [[ -z "$expected_resp" ]]; then

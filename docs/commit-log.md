@@ -4,6 +4,95 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-06-11 — Verification-pass minors: hook telemetry status capture, temp-file traps, telemetry leak tests, doc/comment truth fixes, CI hardening
+
+**Type:** post-c0e91d8 verification findings, all minor. Behavior
+changes are confined to telemetry status values and temp-file cleanup;
+every hook exit code and routing decision is unchanged.
+
+### Changed
+
+- `scripts/hooks/on_not_ready.sh`
+  - stream-ended POST now uses the same `-o /dev/null -w '%{http_code}'`
+    capture pattern as on_ready.sh's HTTP phases, so the
+    `on_not_ready.stream_ended` telemetry event carries the real HTTP
+    status (was hardcoded 0). `-f` kept; exit semantics identical.
+  - Fixed the pre-existing lookup double-emit: on a transport failure
+    `curl -w '%{http_code}' ... || echo 000` produced `000000` (curl
+    already prints `000` via -w when it can, then the echo appended).
+    Restructured to capture curl's rc separately and default the
+    variable only when it is not exactly three digits, so exactly one
+    3-digit code lands in `lookup_status`; the stderr line now logs
+    `status=000 curl_rc=<n>` instead of `status=000000`. (`emit_evt`
+    already coerced either form to 0 — the JSON event was never wrong.)
+  - Added `trap 'rm -f /tmp/lookup-resp.$$' EXIT` so a mid-step abort
+    (`jq -er` under `set -e`, the 8s timeout TERM) cannot leak the
+    temp file (same fix class as on_ready.sh below).
+- `scripts/hooks/on_ready.sh` — trap-based temp-file cleanup:
+  `trap 'rm -f /tmp/on-ready-lookup.$$ /tmp/on-ready-expected.$$' EXIT`
+  installed before first use; the now-redundant inline rms dropped.
+  Covers `jq -er` aborts and the 10s timeout TERM (bash runs the EXIT
+  trap on an untrapped fatal TERM — verified empirically).
+- `scripts/dev/test_on_ready_routing.sh` — makes `_log.sh`'s claim
+  "the test suites' secret-leak greps extend to these lines" true:
+  two new telemetry cases (existing 22 assertions untouched; now 32).
+  Case 6 (happy path) and case 7 (lookup failure, API unreachable)
+  capture hook stdout and assert (a) every `{`-prefixed line parses
+  via `jq -e .` (at least one line required, never vacuous), (b) no
+  occurrence of the suite's own webhook-secret value or `srt://`
+  anywhere on stdout, plus presence of the expected ok/fail event.
+- `docker-compose.yml` — comment truth fixes only: the "1xxxx
+  host-port convention" wording now states this file's defaults only
+  remap 18890/19998/18990 (8554/8889/9997 publish 1:1 here) and that
+  the full 1xxxx remap (18554/18889/19997) is the production-box
+  compose overlay; the :9997 comment no longer claims the firewall
+  allow-list is "api-server egress IP only" (it names the shared
+  read-port allow-list).
+- `docs/design/05-security-hardening.md` §3 — the 8554/8889/9997 rows
+  no longer claim "api-server egress IP (only)": they name the
+  script's real shared read-port allow-list (loopback, LAN host /32,
+  Tailscale 100.64.0.0/10, docker bridges 172.16.0.0/12, api-server
+  egress IP).
+- `scripts/firewall-restrict-readports.sh` — comments only: the
+  metrics/fanout DROP rules note they match dport-only in DOCKER-USER
+  (container egress to an external host's 9998/8990 would also match;
+  no current flow does), and the ip6tables section notes it assumes
+  the v6 DOCKER-USER chain exists (docker with ip6tables support; the
+  script aborts under `set -e` otherwise).
+- `.github/workflows/ci.yml` — `permissions: contents: read`
+  (least-privilege token); `concurrency` group
+  `${{ github.workflow }}-${{ github.ref }}` with
+  `cancel-in-progress: true` (supersede stale runs); `push` scoped to
+  `branches: [main]` so in-repo PR branches run once (as
+  `pull_request`, which stays unrestricted) instead of double-running.
+
+### Verification
+
+- All four T0 suites green: `test_compare.sh` 11/11,
+  `test_on_ready_routing.sh` 32/32 (22 pre-existing + 10 new),
+  `test_snapshotter_local.sh` 30/30, `test_snapshotter_upload.sh`
+  26/26.
+- `bash -n` clean on every touched script.
+- `python3` YAML-parse of `.github/workflows/ci.yml` — ok.
+- `docker compose config -q` — ok.
+- Manual smokes: on_not_ready vs an unreachable API logs
+  `status=000 curl_rc=7` (one 3-digit code) and exits 1; vs the mock
+  server it emits `stream_ended` with the real status; no
+  `/tmp/lookup-resp.*` / `/tmp/on-ready-*` files remain after any run.
+- `bash -c 'trap "echo t" EXIT; kill -TERM $$'` confirms the EXIT trap
+  fires on an untrapped TERM (rc 143), so the timeout-TERM leak path
+  is covered.
+
+### Not in this change
+
+- `docs/follow-ups.md` FU-3's operational note still says "firewall
+  8889/8554/9997 to the api-server's egress IP only" — historical,
+  dated entry; left as-is.
+- No behavior change to firewall rules, compose services, or hook
+  routing/exit codes.
+
+---
+
 ## 2026-06-11 — Docs: name the publish-side trust gap as an accepted v1 risk
 
 **Type:** docs-only. Post-deploy code review confirmed the

@@ -61,9 +61,9 @@ column:
 |---|---|---|---|---|
 | 8890 | 18890 | UDP | SRT ingest | public (admission = deny gate + per-session passphrase) |
 | 8189 | 18189 | UDP | WebRTC ICE media | public (browser direct) |
-| 8554 | 18554 | TCP | RTSP read | api-server egress IP; localhost (snapshotd) |
-| 8889 | 18889 | TCP | WebRTC signaling | api-server egress IP |
-| 9997 | 19997 | TCP | MediaMTX API | api-server egress IP **only** — the api-server is already remote and the allow-list already exists in `firewall-restrict-readports.sh`; multi-node just templates it per node |
+| 8554 | 18554 | TCP | RTSP read | shared read-port allow-list (loopback — used by snapshotd; LAN host `/32`; Tailscale; docker bridges; api-server egress IP) |
+| 8889 | 18889 | TCP | WebRTC signaling | shared read-port allow-list (loopback / LAN host `/32` / Tailscale / docker bridges / api-server egress IP) |
+| 9997 | 19997 | TCP | MediaMTX API | shared read-port allow-list — **not** api-server-only: `firewall-restrict-readports.sh` puts 8554/8889/9997 behind ONE list that also admits loopback, LAN (host `/32` default), Tailscale (`100.64.0.0/10`), and docker bridges (`172.16.0.0/12`) alongside the api-server egress IP; multi-node just templates it per node |
 | 9998 | 19998 | TCP | MediaMTX metrics | monitoring box IP only |
 | 8990 | 18990 | TCP | perception-fanout WS (`docs/perception-fanout.md`) | loopback only by default (co-located Caddy terminates `wss://…/perception/*`); off-box TLS proxy via `FANOUT_PROXY_IP` allow-list in `firewall-restrict-readports.sh` (fail-closed when unset) |
 | 9100/9101/9102 | (direct) | TCP | node_exporter / hookd / snapshotd metrics | monitoring box IP only |

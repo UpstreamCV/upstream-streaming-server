@@ -82,17 +82,22 @@ services:
       # M9.1 (docs/design/05-security-hardening.md §3): host-binds 127.0.0.1
       # by default — resolves the long-standing "do NOT expose 9997 publicly"
       # TODO. Production sets UPSTREAM_MEDIAMTX_API_BIND=0.0.0.0 and relies on
-      # scripts/firewall-restrict-readports.sh to allow-list the api-server
-      # egress IP only.
+      # scripts/firewall-restrict-readports.sh's shared read-port allow-list
+      # (loopback, LAN host /32, Tailscale, docker bridges, api-server
+      # egress IP — see that script's header and docs/design/05 §3).
       - "${UPSTREAM_MEDIAMTX_API_BIND:-127.0.0.1}:9997:9997/tcp"
       # MediaMTX Prometheus metrics (M9.2, docs/design/01-observability.md §2,
       # ledger LG-1; enabled in mediamtx/mediamtx.yml). Host-published as
-      # 19998 (container 9998) per the 1xxxx host-port convention and the
-      # docs/design/05 §3 port table — upstream-monitoring's Prometheus
-      # scrapes ingest.upstreamcv.com:19998 (FU-14). Same bind pattern as
-      # :9997: localhost by default (local scrape: 127.0.0.1:19998);
-      # production sets UPSTREAM_MEDIAMTX_METRICS_BIND=0.0.0.0 and firewalls
-      # 19998 to the monitoring box IP only via
+      # 19998 (container 9998). NOTE on the "1xxxx host-port" remap: THIS
+      # file's defaults only remap 18890 (SRT), 19998 (metrics), and 18990
+      # (fanout) — 8554/8889/9997 above publish 1:1 here. The full 1xxxx
+      # remap (18554/18889/19997) in the docs/design/05 §3 port table is
+      # applied by the production-box compose overlay, not this file.
+      # upstream-monitoring's Prometheus scrapes
+      # ingest.upstreamcv.com:19998 (FU-14). Same bind pattern as :9997:
+      # localhost by default (local scrape: 127.0.0.1:19998); production
+      # sets UPSTREAM_MEDIAMTX_METRICS_BIND=0.0.0.0 and firewalls 19998 to
+      # the monitoring box IP only via
       # scripts/firewall-restrict-readports.sh (MONITORING_IP env).
       - "${UPSTREAM_MEDIAMTX_METRICS_BIND:-127.0.0.1}:19998:9998/tcp"
     volumes:
@@ -181,8 +186,10 @@ services:
         max-size: 10m
         max-file: "5"
     ports:
-      # Host-published as 18990 (container 8990) per the 1xxxx host-port
-      # convention. Localhost by default — local dev talks to
+      # Host-published as 18990 (container 8990) — one of the three ports
+      # this file actually remaps (with 18890/19998; the full 1xxxx remap
+      # is the production-box overlay, see the metrics-port note above).
+      # Localhost by default — local dev talks to
       # ws://127.0.0.1:18990. PROD: UPSTREAM_FANOUT_BIND=0.0.0.0 behind
       # the deployment Caddy, which terminates
       # wss://ingest.upstreamcv.com/perception/* and proxies to
