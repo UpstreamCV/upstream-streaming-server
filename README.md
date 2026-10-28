@@ -186,9 +186,9 @@ context):
 
 - `ingest.upstreamcv.com` — canonical public ingest hostname going
   forward.
-- `<ingest-ip>` — raw public IP the canonical hostname currently
-  resolves to. May change if the ingest node moves; prefer the
-  hostname.
+- The raw public IP the canonical hostname currently resolves to
+  (`nslookup ingest.upstreamcv.com`). May change if the ingest node
+  moves; prefer the hostname.
 - `ingest.upstream.tv` — old / broken hostname (never resolved
   correctly in production). Retained in this repo only as history.
 

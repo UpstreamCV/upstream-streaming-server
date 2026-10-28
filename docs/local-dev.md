@@ -265,9 +265,8 @@ Confirm DNS:
 nslookup ingest.upstreamcv.com
 ```
 
-Expected: an A record pointing at the current ingest server IP (the
-deployed value is `<ingest-ip>`; this may change if the ingest node
-is moved).
+Expected: an A record pointing at the current ingest server IP (this
+may change if the ingest node is moved).
 
 Confirm UDP/18890 reachability via a manual SRT publish (no API
 involved — uses the literal `streamid=publish:dnstest`):

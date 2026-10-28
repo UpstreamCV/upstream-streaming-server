@@ -4,6 +4,24 @@ Milestone-by-milestone change history. Every milestone adds an entry.
 
 ---
 
+## 2026-10-27 — Public-release prep: license, raw IPs out of docs, firewall script requires the API IP
+
+**Type:** docs + script hardening + license.
+
+- `LICENSE` (new) — copyright Upstream Vision, Inc., all rights reserved; visible for reference only.
+- `scripts/firewall-restrict-readports.sh` — `AWS_API_SERVER_IP` no longer defaults to the production Elastic IP. `apply` / `--persist` exit 1 with a usage hint when it is unset; `--remove` is unaffected (it matches rules by tag). Usage examples updated in place, so the `--help` range (lines 2-54) prints the same text. One LAN comment reworded.
+- `README.md`, `docs/local-dev.md`, `docs/troubleshooting.md` — the raw ingest IP is gone; the docs point at `ingest.upstreamcv.com` / `nslookup` instead. Troubleshooting heading "API returns SRT URLs pointing at the raw IP …" is now "… pointing at the raw ingest IP".
+- `docs/perception-fanout.md` — the fanout-proxy invocation now passes `AWS_API_SERVER_IP`.
+- `docs/commit-log.md` — historical raw IPs → `<api-ip>` / `<ingest-ip>`; one LAN comment reworded.
+
+**Operator impact:** re-applying the firewall now needs the API IP on the command line:
+`sudo AWS_API_SERVER_IP=<api-ip> bash scripts/firewall-restrict-readports.sh --persist`.
+Rules already installed on the ingest box are untouched.
+
+**Verification:** `bash -n` passes. With `require_root` stubbed out, `apply` and `--persist` exit 1 with the hint when the variable is unset and proceed to rule installation when it is set.
+
+---
+
 ## 2026-06-11 — Verification-pass minors: hook telemetry status capture, temp-file traps, telemetry leak tests, doc/comment truth fixes, CI hardening
 
 **Type:** post-c0e91d8 verification findings, all minor. Behavior
@@ -1025,7 +1043,7 @@ its approved limits" without killing the stream.
 `scripts/firewall-restrict-readports.sh`.
 
 **What changed:** `LAN_CIDR` default flipped from `10.0.0.0/24` to
-`10.0.0.16/32`. The original allowed every device on the home LAN
+`10.0.0.16/32`. The original allowed every device on the LAN
 — phones, printers, IoT, transient guests, anyone on Wi-Fi — to
 reach MediaMTX's read ports directly, bypassing the api-server's
 account-scoped read auth. Loopback was already covered separately,

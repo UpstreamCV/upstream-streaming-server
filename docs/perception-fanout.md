@@ -188,7 +188,7 @@ Host-published as **18990/tcp** (container 8990), `127.0.0.1` by default
    `127.0.0.1:18990`. The api-server's `fanout_public_ws_url` is then
    `wss://ingest.upstreamcv.com/perception`.
 2. **Off-box TLS proxy:** `UPSTREAM_FANOUT_BIND=0.0.0.0` +
-   `sudo FANOUT_PROXY_IP=<proxy ip> bash scripts/firewall-restrict-readports.sh`
+   `sudo AWS_API_SERVER_IP=<api-ip> FANOUT_PROXY_IP=<proxy ip> bash scripts/firewall-restrict-readports.sh`
    (fail-closed: with `FANOUT_PROXY_IP` unset only loopback passes).
 
 Browsers on an `https://` origin cannot open `ws://` — the wss route is

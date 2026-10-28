@@ -52,10 +52,9 @@
 # strips the rules and exits without re-applying.
 #
 # Usage:
-#   sudo bash scripts/firewall-restrict-readports.sh                 # apply, no persist
-#   sudo bash scripts/firewall-restrict-readports.sh --persist       # apply + save across reboot
+#   sudo AWS_API_SERVER_IP=<api-ip> bash scripts/firewall-restrict-readports.sh            # apply, no persist
+#   sudo AWS_API_SERVER_IP=<api-ip> bash scripts/firewall-restrict-readports.sh --persist  # apply + save across reboot
 #   sudo bash scripts/firewall-restrict-readports.sh --remove        # undo
-#   sudo AWS_API_SERVER_IP=1.2.3.4 bash scripts/firewall-restrict-readports.sh
 #   sudo MONITORING_IP=5.6.7.8 bash scripts/firewall-restrict-readports.sh
 #     # ^ opens the metrics port (host 19998) to the monitoring box only;
 #     #   omit it and the metrics port stays blocked off-box.
@@ -74,7 +73,7 @@ set -euo pipefail
 #
 # `LAN_CIDR` defaults to the streaming-server's own host IP (`/32`), NOT
 # the wider `/24` subnet. The original `/24` would have allowed every
-# device on the home LAN — including phones, printers, IoT, and any
+# device on the LAN — including phones, printers, IoT, and any
 # transient guest device — to hit MediaMTX's read ports directly,
 # bypassing the api-server's account-scoped auth. Loopback is already
 # covered separately, so the only legitimate "LAN" consumer is the
@@ -82,8 +81,13 @@ set -euo pipefail
 # smoke testing. Other deploys with a different LAN topology can
 # override via env (`sudo LAN_CIDR=10.0.0.0/24 bash ...`) for
 # development.
-AWS_API_SERVER_IP="${AWS_API_SERVER_IP:-<api-ip>}"
 LAN_CIDR="${LAN_CIDR:-10.0.0.16/32}"
+
+# `AWS_API_SERVER_IP` (the api-server's Elastic IP) is required for
+# apply / --persist and deliberately has NO default: the production
+# value lives in the private ops notes, and refusing to run is safer
+# than allow-listing a stale address. `--remove` does not need it.
+AWS_API_SERVER_IP="${AWS_API_SERVER_IP:-}"
 TAILSCALE_CIDR="${TAILSCALE_CIDR:-100.64.0.0/10}"
 DOCKER_CIDR="${DOCKER_CIDR:-172.16.0.0/12}"
 
@@ -126,6 +130,14 @@ TAG="upstream-firewall"
 require_root() {
   if [[ $EUID -ne 0 ]]; then
     echo "error: must be run as root. re-run with: sudo bash $0" >&2
+    exit 1
+  fi
+}
+
+require_api_server_ip() {
+  if [[ -z "$AWS_API_SERVER_IP" ]]; then
+    echo "error: AWS_API_SERVER_IP is not set. re-run with:" >&2
+    echo "  sudo AWS_API_SERVER_IP=<api-server elastic ip> bash $0 $mode" >&2
     exit 1
   fi
 }
@@ -301,6 +313,7 @@ case "$mode" in
     ;;
   --persist|apply|"")
     require_root
+    require_api_server_ip
     echo "removing any previously installed '$TAG' rules..."
     remove_tagged_rules
     echo "applying restrict-readports rules..."

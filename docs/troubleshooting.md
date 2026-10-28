@@ -232,7 +232,8 @@ the canonical public hostname `ingest.upstreamcv.com`). See
 nslookup ingest.upstreamcv.com
 ```
 
-Expected: an A record (currently `<ingest-ip>`). If the lookup fails:
+Expected: an A record pointing at the ingest server's public IP. If
+the lookup fails:
 
 - Check the DNS record at the registrar / DNS provider.
 - Try a public resolver: `nslookup ingest.upstreamcv.com 1.1.1.1`.
@@ -268,7 +269,7 @@ Fix: update `upstream-api-server`'s ingest-host configuration to
 `ingest.upstreamcv.com`. This is owned by the API repo, not this one.
 See `docs/follow-ups.md` FU-1 for the historical context.
 
-### API returns SRT URLs pointing at the raw IP `<ingest-ip>`
+### API returns SRT URLs pointing at the raw ingest IP
 
 It will still publish successfully (the IP is the A-record value),
 but prefer the canonical hostname `ingest.upstreamcv.com` so that
@@ -279,9 +280,8 @@ redeploy.
 
 - `ingest.upstream.tv` — old / broken hostname (never resolved
   correctly in production). Retained in this repo only as history.
-- `<ingest-ip>` — raw public IP previously used in some examples
-  before DNS was set up. Currently the value `ingest.upstreamcv.com`
-  resolves to.
+- The raw ingest IP — previously used in some examples before DNS
+  was set up. Prefer the hostname.
 - `ingest.upstreamcv.com` — canonical public ingest hostname going
   forward.
 
